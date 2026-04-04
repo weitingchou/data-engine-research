@@ -4,3 +4,6 @@
 [submodule "datafusion/datafusion"]
 	path = datafusion/datafusion
 	url = https://github.com/apache/datafusion.git
+[submodule "velox/velox"]
+	path = velox/velox
+	url = https://github.com/facebookincubator/velox.git

@@ -73,9 +73,7 @@ sequenceDiagram
     participant User as DataFrame::collect()
     participant ES as execute_stream()
     participant Coal as CoalescePartitionsExec
-    participant Plan as ExecutionPlan (N partitions)
-    participant S0 as Stream(0)
-    participant S1 as Stream(1)
+    participant Plan as ExecutionPlan
 
     User->>ES: execute_stream(plan, context)
     ES->>Plan: plan.output_partitioning().partition_count()
@@ -88,9 +86,9 @@ sequenceDiagram
         ES->>Coal: CoalescePartitionsExec::new(plan)
         ES->>Coal: coal.execute(0, context)
         Coal->>Plan: plan.execute(0, context)
-        Plan-->>Coal: Stream(0)
+        Plan-->>Coal: partition stream 0
         Coal->>Plan: plan.execute(1, context)
-        Plan-->>Coal: Stream(1)
+        Plan-->>Coal: partition stream 1
         Note over Coal: Merges all partition streams<br/>into a single output stream
         Coal-->>ES: Single merged stream
     end
