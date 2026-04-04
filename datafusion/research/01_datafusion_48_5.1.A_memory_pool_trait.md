@@ -1,5 +1,9 @@
 # Module Teardown: The `MemoryPool` Trait
 
+## 0. Research Focus
+* **Task ID:** 5.1.A
+* **Focus:** Analyze the core `MemoryPool` trait. How are `grow()` and `shrink()` methods defined to track global process memory?
+
 ## 1. High-Level Overview
 * **Core Responsibility:** `MemoryPool` is the central abstraction for tracking and limiting memory usage across all concurrently-executing query operators. It provides a **cooperative bookkeeping** system — operators that buffer data proportional to input size (sorts, joins, aggregates) must request memory from the pool before allocating. The pool can reject requests, forcing operators to spill to disk or abort.
 * **Key Triggers:** An operator creates a `MemoryConsumer`, registers it with the pool (obtaining a `MemoryReservation`), then calls `try_grow()` each time it buffers more data. The pool is consulted on every such call. On drop, `MemoryReservation`'s RAII pattern automatically returns memory.

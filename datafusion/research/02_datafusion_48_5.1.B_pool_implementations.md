@@ -1,5 +1,9 @@
 # Module Teardown: Pool Implementations
 
+## 0. Research Focus
+* **Task ID:** 5.1.B
+* **Focus:** Compare `GreedyMemoryPool` (first-come, first-served) and `FairSpillPool` (ensuring even distribution among tasks).
+
 ## 1. High-Level Overview
 * **Core Responsibility:** DataFusion ships four `MemoryPool` implementations offering a spectrum from no limits to fair-share allocation. `UnboundedMemoryPool` is the default (no limits). `GreedyMemoryPool` enforces a hard cap with first-come-first-served semantics. `FairSpillPool` divides available memory evenly among spillable consumers. `TrackConsumersPool<I>` is a decorator that wraps any pool to track per-consumer usage and produce rich error messages. Additionally, `ArrowMemoryPool` bridges DataFusion's pool to Arrow's own `MemoryPool` trait.
 * **Key Triggers:** Pool selection happens once at session startup (via `RuntimeEnvBuilder`). Thereafter, every `try_grow()` call from an operator hits the selected pool's allocation policy. The choice directly determines when operators are forced to spill vs. when they get unbounded memory.

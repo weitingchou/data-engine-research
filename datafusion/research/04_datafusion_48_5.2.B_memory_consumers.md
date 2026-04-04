@@ -1,5 +1,9 @@
 # Module Teardown: Memory Consumers
 
+## 0. Research Focus
+* **Task ID:** 5.2.B
+* **Focus:** How does a specific operator register itself as a consumer? Trace the mechanism an operator uses to request an allocation size.
+
 ## 1. High-Level Overview
 * **Core Responsibility:** `MemoryConsumer` is a named identity that operators create to register themselves with a `MemoryPool`. It acts as the link between an operator and the pool — it carries the operator's name (for error messages and debugging), a `can_spill` flag (which influences pool policies like `FairSpillPool`), and a process-unique id. The consumer is not itself an allocation tracker — it produces a `MemoryReservation` upon registration, which is the actual tracking handle.
 * **Key Triggers:** Created in an operator's `execute()` method (or constructor), immediately before the operator begins buffering data. The `can_spill` flag is set based on the operator's OOM handling capability. Registration with the pool happens exactly once per consumer; the resulting `MemoryReservation` is then used for all subsequent memory accounting.

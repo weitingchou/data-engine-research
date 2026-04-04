@@ -1,5 +1,9 @@
 # Module Teardown: The `MemoryReservation` Lifecycle
 
+## 0. Research Focus
+* **Task ID:** 5.2.A
+* **Focus:** Trace the RAII pattern. How does a `MemoryReservation` guarantee that memory is accurately reported and freed when an operator is dropped?
+
 ## 1. High-Level Overview
 * **Core Responsibility:** `MemoryReservation` is the RAII handle that operators hold to track their memory usage against a `MemoryPool`. It provides the complete API for growing, shrinking, splitting, and freeing memory. On `Drop`, it automatically returns all tracked bytes to the pool. Multiple reservations can share the same `MemoryConsumer` (via `Arc<SharedRegistration>`), enabling sub-allocations within a single operator — for example, one reservation for the hash table and another for buffered input.
 * **Key Triggers:** Created when a `MemoryConsumer` calls `register(pool)`. Grown via `try_grow()` before each buffering allocation. Shrunk after spilling. Automatically freed on drop (RAII). Split when an operator needs independent sub-reservations that can be freed at different times.
