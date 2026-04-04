@@ -20,6 +20,10 @@ Research files follow this pattern:
 
 # Module Teardown: [Module Name / Component]
 
+## 0. Research Focus
+* **Task ID:** [Task ID from tracing guide, e.g., 1.1.A]
+* **Focus:** [The specific research focus from the tracing guide task]
+
 ## 1. High-Level Overview
 * **Core Responsibility:** [A 2-3 sentence summary of what this component actually does in the Trino engine]
 * **Key Triggers:** [What causes this component to act? e.g., an HTTP request, a timer, a method call from an upstream operator]
