@@ -36,26 +36,37 @@ This is an atomic task list for analyzing the Trino source code. **DO NOT attemp
 ---
 
 ## Phase 2: Worker Scheduling & The Driver (Execution Model)
-**Objective:** Break down the cooperative multitasking engine to map it to a Rust Tokio async/await model.
+**Objective:** Map the hierarchical relationship between Tasks and Drivers and trace their full lifecycles to design a compatible async/await model.
 
-* **Task 2.1.A: Task Lifecycle**
-  * **Target Files:** `io.trino.execution.SqlTask`, `io.trino.execution.SqlTaskExecution`
-  * **Focus:** How is a task initialized on a worker? What triggers its creation?
-* **Task 2.1.B: Task State Machine**
+### 2.1 Task Architecture & Lifecycle
+* **Task 2.1.A: Task Creation & Resource Wiring**
+  * **Target Files:** `io.trino.execution.SqlTask`, `io.trino.execution.SqlTaskExecution`, `io.trino.execution.TaskManagerConfig`
+  * **Focus:** How is a `SqlTask` initialized when a `TaskUpdateRequest` hits the worker? What triggers its creation? Trace how it wires up the `OutputBuffer`, `QueryContext`, and `TaskStateMachine` at birth.
+* **Task 2.1.B: The Task State Machine & Terminal Transitions**
   * **Target Files:** `io.trino.execution.TaskStateMachine`
-  * **Focus:** Trace the state transitions (PLANNED, RUNNING, FLUSHING, FINISHED, FAILED, CANCELED) and the listeners attached to them.
-* **Task 2.1.C: The Thread Pool Executor**
-  * **Target Files:** `io.trino.execution.TaskExecutor`
-  * **Focus:** Analyze the core thread pool. How does it accept tasks? How many threads are configured by default relative to CPU cores?
-* **Task 2.1.D: Split Prioritization & Quanta**
+  * **Focus:** Trace the full state transitions: `PLANNED` -> `RUNNING` -> `FLUSHING` -> `FINISHED` (`FAILED`, `CANCELED`). Exactly what logic determines the transition from `FLUSHING` to `FINISHED`?
+* **Task 2.1.C: The Task-Driver Relationship (Concurrency Scaling)**
+  * **Target Files:** `io.trino.execution.SqlTaskExecution`, `io.trino.operator.PipelineFactory`, `io.trino.operator.PipelineContext`
+  * **Focus:** Analyze how a single `SqlTask` creates multiple `PipelineContexts`. Trace the logic that decides how many `Driver` instances to spawn for a single pipeline based on available splits and concurrency settings.
+
+### 2.2 The Scheduling Engine
+* **Task 2.2.A: The Thread Pool Executor**
+  * **Target Files:** `io.trino.execution.executor.TaskExecutor`
+  * **Focus:** Analyze the core thread pool (Runner threads). How does it accept tasks? How does it manage the priority queue of `PrioritizedSplitRunner` objects?
+* **Task 2.2.B: Split Prioritization & Time Quanta**
   * **Target Files:** `io.trino.execution.executor.PrioritizedSplitRunner`, `io.trino.execution.executor.TaskHandle`
-  * **Focus:** Analyze the scheduling logic. How does it determine which query fragment gets CPU time next? How does it measure execution time (quanta) to prevent starvation?
-* **Task 2.2.A: Driver Initialization**
+  * **Focus:** How does the executor track CPU "quanta" (time slices)? Trace how it calculates the priority of a split to ensure fair scheduling across multiple queries.
+
+### 2.3 Driver Lifecycle & The Execution Loop
+* **Task 2.3.A: Driver Initialization & Pipeline Plumbing**
   * **Target Files:** `io.trino.operator.Driver`, `io.trino.operator.DriverContext`
-  * **Focus:** How is a `Driver` instantiated with a pipeline of `Operator` objects? How does `DriverContext` track its lifespan?
-* **Task 2.2.B: The Cooperative Yield Loop (Critical)**
+  * **Focus:** How is a `Driver` instantiated as a sequence of `Operator` instances? Trace how the `DriverContext` is used to track memory and CPU at the driver level.
+* **Task 2.3.B: The Cooperative Yield Loop (The Engine Heart)**
   * **Target Files:** `io.trino.operator.Driver` (focus on `processFor()` and `processInternal()`)
-  * **Focus:** This is the core engine loop. Document exactly what causes the `Driver` loop to suspend processing and yield control back to the `TaskExecutor`.
+  * **Focus:** This is the core cooperative loop. Document exactly what causes a `Driver` to suspend (yield) and return a `ListenableFuture` to the executor (e.g., blocked on an operator, or quantum exhausted).
+* **Task 2.3.C: Driver Termination & Cleanup**
+  * **Target Files:** `io.trino.operator.Driver` (focus on `close()` and `isFinished()`)
+  * **Focus:** When is a `Driver` considered done? Trace the cleanup path: closing operators, releasing memory back to the `PipelineContext`, and signaling the `TaskStateMachine`.
 
 ---
 
