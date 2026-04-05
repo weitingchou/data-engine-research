@@ -11,27 +11,27 @@ This is an atomic task list for analyzing the Trino source code. **DO NOT attemp
 
 ---
 
-## Phase 1: The Foundation & Memory SPI (Data Layout)
-**Objective:** Understand raw columnar data representation before it enters the execution engine. This is essential for mapping to Apache Arrow.
+## Phase 1: Foundation Tracing Guide
 
-* **Task 1.1.A: The `Slice` Memory Wrapper**
-  * **Target Files:** `io.airlift.slice.Slice`, `io.airlift.slice.Slices`
-  * **Focus:** How does Trino wrap off-heap `byte[]` arrays or direct memory buffers? Analyze bounds checking and unsafe memory access patterns.
-* **Task 1.1.B: The `Block` & `BlockBuilder` Interfaces**
-  * **Target Files:** `io.trino.spi.block.Block`, `io.trino.spi.block.BlockBuilder`
-  * **Focus:** Analyze the contract for columnar data. How are nulls (validity bitmaps) conceptually represented at this interface level?
-* **Task 1.1.C: Variable-Width Storage**
-  * **Target Files:** `io.trino.spi.block.VariableWidthBlock`, `io.trino.spi.block.VariableWidthBlockBuilder`
-  * **Focus:** Trace exactly how variable-length data (like VARCHAR) calculates its `offsets` array and manages its underlying `Slice` memory.
-* **Task 1.1.D: Primitive Storage & Dictionary Compression**
-  * **Target Files:** `io.trino.spi.block.LongArrayBlock`, `io.trino.spi.block.DictionaryBlock`
-  * **Focus:** Compare primitive storage to variable-width. How does `DictionaryBlock` map an array of `ids` to a separate dictionary `Block`?
-* **Task 1.2.A: The `Page` Construct**
-  * **Target Files:** `io.trino.spi.Page`, `io.trino.spi.PageBuilder`
-  * **Focus:** How are multiple `Blocks` bound together into a `Page` (representing a batch of rows)? Trace the `getSizeInBytes()` and `getRetainedSizeInBytes()` calculations.
-* **Task 1.3.A: The Ingestion Boundary**
-  * **Target Files:** `io.trino.spi.connector.ConnectorPageSource`
-  * **Focus:** Understand the interface workers use to pull `Page` batches from underlying storage plugins.
+### Slice
+* **Task 1.1.A: The `Slice` Memory Interface & Metadata**
+    * **Target Files:** `io.airlift.slice.Slice`, `io.airlift.slice.Slices`
+    * **Focus:** Analyze the internal metadata of a `Slice` (typically a base object reference, an address offset, and a size). Trace the APIs that utilize `Unsafe` memory access. Contrast `HeapSlice` with `DirectSlice`.
+
+### Block
+* **Task 1.2.A: The `Block` Interface & Internal Metadata**
+    * **Target Files:** `io.trino.spi.block.Block`, `io.trino.spi.block.VariableWidthBlock`, `io.trino.spi.block.LongArrayBlock`
+    * **Focus:** Open `VariableWidthBlock` and trace its internal fields (`Slice`, `int[] offsets`, `boolean[] valueIsNull`). Analyze the read-only contract of the `Block` interface. Specifically trace the `getRegion()` method to understand how zero-copy columnar slicing is implemented without duplicating the underlying memory.
+
+### Page
+* **Task 1.3.A: The `Page` Interface & Zero-Copy Mutations**
+    * **Target Files:** `io.trino.spi.Page`
+    * **Focus:** Inspect the internal fields of a `Page` (`Block[]`, `positionCount`). Analyze `Page` as a passive data container. Trace how `Page.getColumns()` and `Page.prependColumn()` create new `Page` instances via shallow copies of `Block` references. 
+
+### Physical Data Mapping
+* **Task 1.4.A: Physical Data Mapping (The S3 Bridge)**
+    * **Target Files:** `io.trino.spi.connector.ConnectorPageSource`, `io.trino.parquet.ParquetDataSource` (or ORC equivalent), `io.trino.plugin.iceberg.IcebergPageSource`
+    * **Focus:** Trace the path of an S3 read. How does the data source pull a range of bytes from the object store into a `Slice`? How does the format reader extract values to populate the `BlockBuilder` and ultimately emit a `Page`?
 
 ---
 
