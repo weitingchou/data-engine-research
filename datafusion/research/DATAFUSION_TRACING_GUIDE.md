@@ -11,27 +11,33 @@ This is an atomic task list for analyzing the Apache DataFusion source code (and
 
 ---
 
-## Phase 1: The Foundation & SPI (Data Layout)
-**Objective:** Understand raw columnar data representation before it enters the physical execution engine. DataFusion relies natively on the Apache Arrow memory model.
+## Phase 1: Foundation Tracing Guide (DataFusion)
+**Objective:** Understand Arrow's physical layout and DataFusion's async ingestion path to contrast with Trino's memory SPI.
 
-* **Task 1.1.A: The `Buffer` and `ArrayData` Foundation**
-  * **Target Crates/Files:** `arrow-buffer/src/buffer/immutable.rs`, `arrow-data/src/data/mod.rs`
-  * **Focus:** How does Arrow manage contiguous memory regions? Trace how `ArrayData` stores buffers, lengths, null counts, and offsets.
-* **Task 1.1.B: The `Array` Trait and Primitives**
-  * **Target Crates/Files:** `arrow-array/src/array/mod.rs`, `arrow-array/src/array/primitive_array.rs`
-  * **Focus:** Analyze the `Array` trait contract. How does `PrimitiveArray` map standard types (like `i32`, `f64`) onto the underlying `ArrayData` buffers?
-* **Task 1.1.C: Variable-Width Storage & Strings**
-  * **Target Crates/Files:** `arrow-array/src/array/string_array.rs`, `arrow-array/src/array/byte_array.rs`
-  * **Focus:** Trace exactly how variable-length data (like `StringArray`) calculates its offsets buffer and manages its underlying byte buffer.
-* **Task 1.1.D: Nullability and Validity Bitmaps**
-  * **Target Crates/Files:** `arrow-buffer/src/buffer/null_buffer.rs`
-  * **Focus:** How are nulls conceptually represented? Trace how the validity bitmap is read and written using bitwise operations.
-* **Task 1.2.A: The `RecordBatch` Construct**
-  * **Target Crates/Files:** `arrow-array/src/record_batch.rs`
-  * **Focus:** How are multiple `Array` instances bound together into a `RecordBatch` (representing a batch of rows)? Trace how row counts and schema alignments are validated.
-* **Task 1.2.B: Schema and Field Metadata**
-  * **Target Crates/Files:** `arrow-schema/src/schema.rs`, `arrow-schema/src/field.rs`
-  * **Focus:** Analyze how `Schema` and `Field` hold datatype information and metadata.
+### Buffer
+* **Task 1.1: The `Buffer` and Arrow Memory Management**
+  * **Target Crates/Files:** `arrow-buffer` (`src/buffer/immutable.rs`, `src/bytes.rs`)
+  * **Focus:** Trace how `Buffer` manages underlying `Bytes`. Analyze the implementation of `Buffer::slice()`. How does it use `Arc` for shared ownership? How is 64-byte alignment enforced?
+
+### Array
+* **Task 1.2: Columnar Construction and Bitmaps (`Array`)**
+  * **Target Crates/Files:** `arrow-array` (`src/array/primitive_array.rs`, `src/array/string_array.rs`)
+  * **Focus:** Inspect the internal fields of a `StringArray`. How does it map to multiple `Buffer`s? Trace the `NullBuffer` implementation — how does Arrow pack 8 null values into a single byte, and how does this contrast with Trino's `boolean[]`?
+
+### RecordBatch
+* **Task 1.3: The `RecordBatch` Envelope**
+  * **Target Crates/Files:** `arrow-array` (`src/record_batch.rs`)
+  * **Focus:** Analyze `RecordBatch::project()`. Confirm that it is a zero-copy operation manipulating `Arc<dyn Array>`. Compare its memory overhead to Trino's `Page`.
+
+### Physical Data Mapping
+* **Task 1.4: Async Physical Data Mapping (The S3 Bridge)**
+  * **Target Crates/Files:** `datafusion-physical-plan` (`src/parquet/mod.rs`), `parquet` (`src/arrow/async_reader/mod.rs`), `object_store`
+  * **Focus:** Trace the execution of `ParquetExec::execute()`. How does it interact with `object_store` to fetch byte ranges asynchronously? Trace `ParquetRecordBatchStream` to see how `tokio::spawn` is used to parallelize I/O and decoding.
+
+### Memory Accounting
+* **Task 1.5: RAII Memory Accounting**
+  * **Target Crates/Files:** `datafusion-execution` (`src/memory_pool/mod.rs`)
+  * **Focus:** Analyze the `MemoryReservation` struct. Trace its `try_grow()` method and its `Drop` implementation. How does this Rust-native approach prevent the under-counting issues possible in Trino's GC-based `getRetainedSizeInBytes()` model?
 
 ---
 
