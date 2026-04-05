@@ -1,5 +1,24 @@
 # Trino 480 Worker Module Map
 
+## Table of Contents
+
+- [Mind Map](#mind-map)
+- [Detailed Module Breakdown](#detailed-module-breakdown)
+  - [1. HTTP API Layer](#1-http-api-layer)
+  - [2. Task Management](#2-task-management)
+  - [3. Plan Compilation](#3-plan-compilation)
+  - [4. Scheduling Engine](#4-scheduling-engine)
+  - [5. Execution Engine](#5-execution-engine)
+  - [6. Data Model](#6-data-model)
+  - [7. Data Exchange](#7-data-exchange)
+  - [8. Connector Interface (Storage SPI)](#8-connector-interface-storage-spi)
+  - [9. Memory Management](#9-memory-management)
+  - [10. Plugin System](#10-plugin-system)
+- [Data Flow: How Modules Connect](#data-flow-how-modules-connect)
+- [Request Lifecycle (end-to-end)](#request-lifecycle-end-to-end)
+
+---
+
 ## Mind Map
 
 Modules are plain text, classes are wrapped in `[brackets]`.
@@ -79,6 +98,27 @@ The worker's external surface. All coordinator communication enters here via JAX
 | `ThreadResource` | `c.t.server.ThreadResource` | `GET /v1/thread` — thread dump for diagnostics |
 | `ServerConfig` | `c.t.server.ServerConfig` | Determines if this node is coordinator, worker, or both |
 
+```mermaid
+classDiagram
+    TaskResource --> SqlTaskManager : @Inject delegates
+    MemoryResource --> LocalMemoryManager : @Inject delegates
+    class TaskResource {
+        +createOrUpdateTask()
+        +getResults()
+        +deleteTask()
+        +getTaskStatus()
+    }
+    class MemoryResource {
+        +getMemoryInfo()
+    }
+    class ThreadResource {
+        +getThreadInfo()
+    }
+    class ServerConfig {
+        +isCoordinator()
+    }
+```
+
 ### 2. Task Management
 Lifecycle of tasks on the worker. Bridges REST requests to the execution engine.
 
@@ -91,6 +131,31 @@ Lifecycle of tasks on the worker. Bridges REST requests to the execution engine.
 | `TaskStateMachine` | `c.t.execution.TaskStateMachine` | 10 states with two-phase termination. `PLANNED → RUNNING → FLUSHING → FINISHED` (happy path). |
 | `TaskContext` | `c.t.operator.TaskContext` | Per-task resource context. Creates `PipelineContext` children. Bridges to `QueryContext` for memory. |
 | `TaskUpdateRequest` | `c.t.server.TaskUpdateRequest` | JSON DTO: carries plan fragment, splits, output buffers, and dynamic filter domains from coordinator. |
+
+```mermaid
+classDiagram
+    SqlTaskManager --> SqlTask : creates/caches
+    SqlTask *-- TaskStateMachine
+    SqlTask *-- TaskHolder
+    TaskHolder --> SqlTaskExecution : holds
+    SqlTaskExecution *-- TaskContext
+    SqlTaskExecution --> LocalExecutionPlanner : uses
+    TaskUpdateRequest ..> SqlTaskManager : input to updateTask
+    class SqlTaskManager {
+        -tasks: Cache~TaskId, SqlTask~
+    }
+    class SqlTask {
+        -taskStateMachine
+        -taskHolderReference
+    }
+    class TaskHolder {
+        -taskExecution: SqlTaskExecution
+    }
+    class TaskStateMachine {
+        +getState()
+        +transitionTo()
+    }
+```
 
 ### 3. Plan Compilation
 Translates a plan fragment into executable operator pipelines. Glue between the distributed plan and local execution.
@@ -106,6 +171,29 @@ Translates a plan fragment into executable operator pipelines. Glue between the 
 | `ColumnarFilterCompiler` | `c.t.sql.gen.columnar.ColumnarFilterCompiler` | Generates columnar filter evaluators that process entire columns at once. |
 | `PageProcessor` | `c.t.operator.project.PageProcessor` | Compiled artifact: filter + projection list. Applied by `ScanFilterAndProjectOperator` with adaptive batching and yield. |
 
+```mermaid
+classDiagram
+    LocalExecutionPlanner --> LocalExecutionPlan : produces
+    LocalExecutionPlan *-- DriverFactory : contains list
+    DriverFactory *-- OperatorFactory : contains list
+    DriverFactory --> Driver : creates
+    OperatorFactory --> Operator : creates
+    ExpressionCompiler *-- PageFunctionCompiler : @Inject
+    ExpressionCompiler *-- ColumnarFilterCompiler : @Inject
+    ExpressionCompiler --> PageProcessor : produces
+    class OperatorFactory {
+        <<interface>>
+        +createOperator(DriverContext) Operator
+    }
+    class LocalExecutionPlan {
+        -driverFactories: List~DriverFactory~
+    }
+    class PageProcessor {
+        -filterEvaluator
+        -projections: List~PageProjection~
+    }
+```
+
 ### 4. Scheduling Engine
 Manages the fixed-size thread pool and decides which driver runs next.
 
@@ -118,6 +206,32 @@ Manages the fixed-size thread pool and decides which driver runs next.
 | `SplitConcurrencyController` | `c.t.execution.executor.timesharing.SplitConcurrencyController` | Dynamically adjusts concurrent driver count per pipeline based on throughput. |
 | `DriverYieldSignal` | `c.t.operator.DriverYieldSignal` | Shared flag. Set by executor when quantum expires. Operators cooperatively check during long operations. |
 | `TaskHandle` | `c.t.execution.executor.timesharing.TaskHandle` | Per-task metadata in the executor: tracks all split runners, concurrency limits, resource group. |
+
+```mermaid
+classDiagram
+    TimeSharingTaskExecutor *-- MultilevelSplitQueue
+    TimeSharingTaskExecutor o-- TaskHandle : tracks per task
+    MultilevelSplitQueue o-- PrioritizedSplitRunner : priority queues
+    PrioritizedSplitRunner *-- SplitRunner : wraps
+    DriverSplitRunner ..|> SplitRunner : implements
+    DriverSplitRunner --> Driver : creates lazily
+    TaskHandle *-- SplitConcurrencyController
+    class SplitRunner {
+        <<interface>>
+        +processFor(duration) ListenableFuture
+    }
+    class TaskHandle {
+        <<interface>>
+        +isDestroyed()
+    }
+    class MultilevelSplitQueue {
+        -levelWaitingSplits: PriorityQueue~PrioritizedSplitRunner~[]
+    }
+    class DriverYieldSignal {
+        +setWithDelay()
+        +isSet() boolean
+    }
+```
 
 ### 5. Execution Engine
 The actual computation. Drivers shuttle Pages through Operator chains.
@@ -133,6 +247,34 @@ The actual computation. Drivers shuttle Pages through Operator chains.
 | `WorkProcessorOperatorAdapter` | `c.t.operator.WorkProcessorOperatorAdapter` | Bridges `WorkProcessorOperator` to the push-pull `Operator` interface for the Driver. |
 | `OperatorContext` | `c.t.operator.OperatorContext` | Per-operator resource tracking: CPU time, wall time, memory (user + revocable), peak tracking, revocation flag. |
 | **54 concrete operators** | `c.t.operator.*` | See Task 3.1.C catalog. 10 categories. Only 4 support spilling: `HashAggregationOperator`, `OrderByOperator`, `WindowOperator`, `spilling.HashBuilderOperator`. |
+
+```mermaid
+classDiagram
+    PipelineContext --> DriverContext : creates
+    DriverContext --> OperatorContext : creates
+    Driver *-- DriverContext
+    Driver *-- Operator : contains list
+    SourceOperator --|> Operator : extends
+    WorkProcessorOperatorAdapter ..|> Operator : implements
+    WorkProcessorOperatorAdapter *-- WorkProcessorOperator : adapts
+    class Operator {
+        <<interface>>
+        +needsInput() boolean
+        +addInput(Page)
+        +getOutput() Page
+        +isFinished() boolean
+        +isBlocked() ListenableFuture
+    }
+    class SourceOperator {
+        <<interface>>
+        +addSplit(Split)
+        +noMoreSplits()
+    }
+    class WorkProcessorOperator {
+        <<interface>>
+        +getOutputPages() WorkProcessor~Page~
+    }
+```
 
 ### 6. Data Model
 In-memory columnar representation. Passive data — no compute logic.
@@ -151,6 +293,34 @@ In-memory columnar representation. Passive data — no compute logic.
 | `BlockBuilder` | `spi.block.BlockBuilder` | Interface. Mutable append-only builder. `build()` freezes into immutable `Block`. |
 | `PageBuilder` | `spi.PageBuilder` | Page-level builder. Wraps `BlockBuilder[]`. Tracks size via `PageBuilderStatus` (1MB limit). |
 | `PageBuilderStatus` | `spi.block.PageBuilderStatus` | Back-pressure: `isFull()` triggers page emit when accumulated size exceeds 1MB. |
+
+```mermaid
+classDiagram
+    Block <|-- ValueBlock : extends
+    Block <|.. DictionaryBlock : implements
+    Block <|.. RunLengthEncodedBlock : implements
+    ValueBlock <|.. LongArrayBlock : implements
+    ValueBlock <|.. VariableWidthBlock : implements
+    DictionaryBlock *-- ValueBlock : dictionary
+    RunLengthEncodedBlock *-- ValueBlock : value
+    VariableWidthBlock *-- Slice : data storage
+    Page *-- Block : blocks array
+    PageBuilder *-- BlockBuilder : builders array
+    PageBuilder *-- PageBuilderStatus
+    BlockBuilder --> Block : build()
+    Slices --> Slice : factory
+    class Block {
+        <<sealed interface>>
+    }
+    class ValueBlock {
+        <<non-sealed interface>>
+    }
+    class BlockBuilder {
+        <<interface>>
+        +appendNull()
+        +build() Block
+    }
+```
 
 ### 7. Data Exchange
 Inter-worker shuffle and result delivery.
@@ -175,6 +345,29 @@ Inter-worker shuffle and result delivery.
 | `HttpPageBufferClient` | `c.t.operator.HttpPageBufferClient` | Per-upstream HTTP client. Token-based idempotent protocol, eager ack, exponential backoff. |
 | `StreamingDirectExchangeBuffer` | `c.t.operator.StreamingDirectExchangeBuffer` | In-memory FIFO of received serialized pages with capacity-based back-pressure. |
 
+```mermaid
+classDiagram
+    OutputBuffer <|.. PartitionedOutputBuffer : implements
+    OutputBuffer <|.. BroadcastOutputBuffer : implements
+    OutputBuffer <|.. ArbitraryOutputBuffer : implements
+    LazyOutputBuffer ..|> OutputBuffer : implements
+    LazyOutputBuffer --> OutputBuffer : delegates to
+    PartitionedOutputBuffer *-- ClientBuffer : per partition
+    BroadcastOutputBuffer *-- ClientBuffer : per consumer
+    PartitionedOutputBuffer *-- OutputBufferMemoryManager
+    PagesSerdeFactory --> CompressingEncryptingPageSerializer : creates
+    PartitionedOutputOperator --> OutputBuffer : enqueues pages
+    TaskOutputOperator --> OutputBuffer : enqueues pages
+    DirectExchangeClient *-- HttpPageBufferClient : manages N
+    DirectExchangeClient *-- StreamingDirectExchangeBuffer
+    ExchangeOperator --> DirectExchangeClient : polls
+    class OutputBuffer {
+        <<interface>>
+        +enqueue(pages)
+        +get(bufferId, token)
+    }
+```
+
 ### 8. Connector Interface (Storage SPI)
 The boundary between the engine and external data sources/sinks.
 
@@ -198,6 +391,37 @@ The boundary between the engine and external data sources/sinks.
 | `ConnectorSplit` | `spi.connector.ConnectorSplit` | Opaque handle: file, byte range, partition shard. |
 | `ConnectorTableHandle` | `spi.connector.ConnectorTableHandle` | Carries pushed-down predicates from planning. |
 | `ConnectorMetadata` | `spi.connector.ConnectorMetadata` | Metadata SPI: table listing, column info, begin/finish write transactions. |
+
+```mermaid
+classDiagram
+    PageSourceManager --> ConnectorPageSourceProvider : routes to
+    ConnectorPageSourceProvider --> ConnectorPageSource : creates
+    ConnectorPageSource --> SourcePage : returns
+    ConnectorPageSourceProvider ..> ConnectorSplit : takes as input
+    ConnectorPageSourceProvider ..> DynamicFilter : takes as input
+    DynamicFilterService --> DynamicFilter : distributes
+    PageSinkManager --> ConnectorPageSinkProvider : routes to
+    ConnectorPageSinkProvider --> ConnectorPageSink : creates
+    TableWriterOperator --> ConnectorPageSink : writes pages
+    TableFinishOperator --> ConnectorMetadata : commits via
+    class ConnectorPageSource {
+        <<interface>>
+        +getNextSourcePage() SourcePage
+        +isFinished() boolean
+    }
+    class ConnectorPageSink {
+        <<interface>>
+        +appendPage(Page)
+        +finish() Collection~Slice~
+    }
+    class DynamicFilter {
+        <<interface>>
+        +getCurrentPredicate() TupleDomain
+    }
+    class ConnectorSplit {
+        <<interface>>
+    }
+```
 
 ### 9. Memory Management
 Hierarchical tracking, flow control, spilling, and cluster-level arbitration.
@@ -224,6 +448,34 @@ Hierarchical tracking, flow control, spilling, and cluster-level arbitration.
 | `FileSingleStreamSpiller` | `c.t.spiller.FileSingleStreamSpiller` | Writes serialized pages to temp files. Optional LZ4/ZSTD + AES encryption. |
 | `SpillSpaceTracker` | `c.t.spiller.SpillSpaceTracker` | Global per-node spill disk quota. |
 
+```mermaid
+classDiagram
+    LocalMemoryManager --> MemoryPool : creates
+    LocalMemoryManager ..> NodeMemoryConfig : reads config
+    QueryContext --> MemoryPool : reserves from
+    QueryContext --> MemoryTrackingContext : creates per task
+    MemoryTrackingContext *-- RootAggregatedMemoryContext : user + revocable
+    RootAggregatedMemoryContext *-- MemoryReservationHandler : bridges to pool
+    RootAggregatedMemoryContext --> ChildAggregatedMemoryContext : creates children
+    ChildAggregatedMemoryContext --> ChildAggregatedMemoryContext : creates children
+    ChildAggregatedMemoryContext --> SimpleLocalMemoryContext : creates leaves
+    CoarseGrainLocalMemoryContext --> SimpleLocalMemoryContext : decorates 64KB batch
+    MemoryRevokingScheduler --> MemoryPool : monitors threshold
+    MemoryRevokingScheduler --> VoidTraversingQueryContextVisitor : traverses tree
+    GenericSpiller ..|> Spiller : implements
+    GenericSpiller --> FileSingleStreamSpiller : creates per stream
+    FileSingleStreamSpiller --> SpillSpaceTracker : tracks disk quota
+    class MemoryPool {
+        -queryMemoryReservations: ConcurrentHashMap
+        +reserve() ListenableFuture
+        +free()
+    }
+    class Spiller {
+        <<interface>>
+        +spill(pages) ListenableFuture
+    }
+```
+
 ### 10. Plugin System
 Extensibility: loading connectors, types, and functions at startup.
 
@@ -234,6 +486,29 @@ Extensibility: loading connectors, types, and functions at startup.
 | `CatalogManager` | `c.t.metadata.CatalogManager` | Interface. Catalog registry (static + dynamic catalogs). |
 | `TypeRegistry` | `c.t.metadata.TypeRegistry` | Maps type signatures → `Type` implementations. Resolves type operators and `BlockEncoding`. |
 | `FunctionManager` | `c.t.metadata.FunctionManager` | Function resolution and binding for built-in and plugin-provided functions. |
+
+```mermaid
+classDiagram
+    PluginManager --> ConnectorManager : registers connectors
+    PluginManager --> TypeRegistry : registers types
+    PluginManager --> FunctionManager : registers functions
+    ConnectorManager --> CatalogManager : manages catalogs
+    class PluginManager {
+        +installPlugin()
+        +loadPlugin()
+    }
+    class CatalogManager {
+        <<interface>>
+        +createCatalog()
+        +dropCatalog()
+    }
+    class TypeRegistry {
+        +getType(TypeSignature) Type
+    }
+    class FunctionManager {
+        +getScalarFunctionImplementation()
+    }
+```
 
 ---
 
