@@ -11,7 +11,7 @@ This is an atomic task list for analyzing the Trino source code. **DO NOT attemp
 
 ---
 
-## Phase 1: Foundation Tracing Guide
+## Phase 1: Foundation Tracing Guide (Memory Layout)
 
 ### Slice
 * **Task 1.1.A: The `Slice` Memory Interface & Metadata**
@@ -161,20 +161,24 @@ How the worker interacts with the SPI (Service Provider Interface) to get raw da
 ---
 
 ## Phase 5: Memory Tracking & Arbitration (Memory Management)
-**Objective:** Map out the strict hierarchical memory accounting system to replicate it in Rust.
+**Objective:** Map out the strict hierarchical memory accounting system to understand flow control, spilling triggers, and query arbitration. This is vital for replicating safe resource management in a Rust worker.
 
-* **Task 5.1.A: Global Memory Pools**
-  * **Target Files:** `io.trino.memory.MemoryPool`
-  * **Focus:** How does the worker track total JVM memory? Analyze the concept of reserved vs. general pools (if applicable to the current Trino version).
-* **Task 5.1.B: Query Level Tracking**
-  * **Target Files:** `io.trino.memory.QueryContext`
-  * **Focus:** How does the worker isolate memory tracking per query to ensure one heavy query doesn't crash the worker?
-* **Task 5.1.C: The Tracking Tree**
-  * **Target Files:** `io.trino.memory.context.MemoryTrackingContext`
-  * **Focus:** Analyze the hierarchical tree structure (System -> Query -> Task -> Pipeline -> Driver -> Operator).
-* **Task 5.2.A: Operator Allocation Reporting**
-  * **Target Files:** `io.trino.memory.context.LocalMemoryContext`
-  * **Focus:** Trace the exact mechanism an `Operator` uses to report an allocation (e.g., `setBytes()`). What happens synchronously when this call exceeds a limit?
-* **Task 5.2.B: Memory Revocation**
-  * **Target Files:** `io.trino.memory.context.MemoryRevokingContext`
-  * **Focus:** How does the engine signal an operator that it needs to free memory (triggering the spilling mechanism identified in Task 3.5.A)?
+### The Global Pool and the Tracking Tree 
+* **Task 5.1.A: The Global Pool and the Tracking Tree**
+    * **Target Files:** `io.trino.memory.MemoryPool`, `io.trino.memory.QueryContext`, `io.trino.memory.context.MemoryTrackingContext`
+    * **Focus:** Analyze how the single global `MemoryPool` is constructed. Trace the creation of the context tree (Query -> Task -> Pipeline -> Driver -> Operator). How do deltas (additions/subtractions of memory) propagate up this tree without causing severe lock contention?
+
+### Operator Allocation and Blocking 
+* **Task 5.2.A: Operator Allocation and Blocking**
+    * **Target Files:** `io.trino.memory.context.LocalMemoryContext`, `io.trino.memory.context.UserMemoryContext`
+    * **Focus:** Trace the exact mechanism an Operator uses to report an allocation: `LocalMemoryContext.setBytes()`. What is the exact execution path when this call results in a limit being exceeded? Trace how the resulting `ListenableFuture` is passed back to the Driver yield loop.
+
+### Revocable Memory and Spilling
+* **Task 5.3.A: Revocable Memory and Spilling**
+    * **Target Files:** `io.trino.memory.context.RevocableMemoryContext`, `io.trino.execution.MemoryRevokingScheduler`
+    * **Focus:** Look at `HashBuilderOperator` or `HashAggregationOperator`. Trace how they allocate memory via the `RevocableMemoryContext`. How does the `MemoryRevokingScheduler` monitor the global pool, select a victim task, and invoke the asynchronous revoking process?
+
+### Cluster Arbitration and the OOM Killer
+* **Task 5.4.A: Cluster Arbitration and the OOM Killer**
+    * **Target Files:** `io.trino.memory.ClusterMemoryManager`, `io.trino.memory.LowMemoryKiller`
+    * **Focus:** This requires jumping to the Coordinator. How does the coordinator aggregate the `MemoryInfo` from all workers? Trace the logic in `ClusterMemoryManager` when a worker reports a "blocked" state. How does the `LowMemoryKiller` select a victim, and how is the "kill" signal propagated back down the Control Plane (Phase 4) to the workers?
