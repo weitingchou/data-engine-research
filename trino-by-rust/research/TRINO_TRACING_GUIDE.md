@@ -119,24 +119,44 @@ What happens when a single Operator demands more memory than the worker can prov
 
 ---
 
-## Phase 4: Network & Data Exchange (Shuffle)
-**Objective:** Understand how workers shuffle data over the wire, defining the API boundaries for the Rust worker.
+## Phase 4: Communication Interfaces (Data Exchange)
+**Objective:** Understand the three critical interface boundaries of a Trino Worker: Control (Coordinator), Data (Shuffle), and Storage (Connector). This defines the full API surface required for a compatible worker implementation.
 
-* **Task 4.1.A: The Exchange Client**
-  * **Target Files:** `io.trino.operator.exchange.ExchangeClient`
-  * **Focus:** How does a worker manage connections to multiple upstream workers? How does it buffer incoming data?
-* **Task 4.1.B: HTTP Polling**
-  * **Target Files:** `io.trino.operator.HttpPageBufferClient`
-  * **Focus:** Trace the actual HTTP request cycle. How does it handle retries, backoff, and deserializing the wire format back into a `Page`?
-* **Task 4.2.A: Holding Results (Output Buffers)**
-  * **Target Files:** `io.trino.execution.buffer.OutputBuffer`, `io.trino.execution.buffer.ClientBuffer`
-  * **Focus:** How does a `Driver` write its final `Page` outputs? How are they queued in memory waiting for downstream workers?
-* **Task 4.2.B: Partitioning Data**
-  * **Targetাক্ষ Files:** `io.trino.execution.buffer.PartitionedOutputBuffer`
-  * **Focus:** Trace the hashing logic. How does it ensure specific rows are routed to the correct downstream task (e.g., during a distributed Group By)?
-* **Task 4.2.C: The Network API Endpoint**
-  * **Target Files:** `io.trino.server.TaskResource`
-  * **Focus:** Analyze the REST endpoints. What URL schemas and HTTP verbs are used by downstream workers to pull data from the `OutputBuffer`?
+### Task 4.1: The Control Plane (Coordinator ↔ Worker)
+How the "Brain" manages the "Muscle." This is primarily REST/JSON based.
+
+* **Task 4.1.A: Task Lifecycle Management**
+    * **Target Files:** `io.trino.server.TaskResource`, `io.trino.execution.SqlTask`
+    * **Focus:** Analyze the REST endpoints for creating, updating, and deleting tasks. Trace the `TaskUpdateRequest` JSON structure. How does the worker receive the "Physical Plan" from the coordinator?
+* **Task 4.1.B: Status & Heartbeat Reporting**
+    * **Target Files:** `io.trino.execution.TaskStateMachine`, `io.trino.server.TaskStatus`
+    * **Focus:** How does the worker report its health, memory usage, and execution progress back to the coordinator? Trace the asynchronous long-polling mechanism used to update task status.
+* **Task 4.1.C: Dynamic Filter Coordination**
+    * **Target Files:** `io.trino.server.DynamicFilterService`
+    * **Focus:** Trace how a worker "collects" a filter (from a join build side) and sends it back to the coordinator, and how the coordinator then "broadcasts" it to other workers to prune scans.
+
+### Task 4.2: The Data Plane (Worker ↔ Worker Shuffle)
+How data moves between workers during a query. This is high-volume HTTP streaming.
+
+* **Task 4.2.A: Result Buffering (The Server Side)**
+    * **Target Files:** `io.trino.execution.buffer.OutputBuffer`, `io.trino.execution.buffer.PagesSerde`
+    * **Focus:** How are `Page` objects serialized into the wire format? Trace the logic in `PartitionedOutputBuffer` that hashes rows to decide which downstream worker gets which data.
+* **Task 4.2.B: The Exchange Client (The Client Side)**
+    * **Target Files:** `io.trino.operator.exchange.ExchangeClient`, `io.trino.operator.HttpPageBufferClient`
+    * **Focus:** How does a worker pull data from multiple upstream workers? Trace the HTTP request cycle: headers used for flow control (`X-Trino-Buffer-Remaining-Bytes`), retries, and backoff.
+* **Task 4.2.C: The Coordinator as the Final Consumer**
+    * **Target Files:** `io.trino.server.StatementResource`, `io.trino.execution.DataPuller` (or how `Query` manages the final exchange)
+    * **Focus:** Trace how the coordinator fetches the final result set from the root task. How does the root worker's `OutputBuffer` differ (if at all) from an intermediate shuffle buffer? How are internal `Pages` finally converted into the client-facing format?
+
+### Task 4.3: The Storage Plane (Worker ↔ Connector)
+How the worker interacts with the SPI (Service Provider Interface) to get raw data.
+
+* **Task 4.3.A: The Page Source (Reading)**
+    * **Target Files:** `io.trino.spi.connector.ConnectorPageSource`, `io.trino.connector.hive.HivePageSource` (as an example)
+    * **Focus:** Trace the boundary where a "Split" is converted into a stream of `Page` objects. How does the worker pass column projections and predicate pushdowns into the connector?
+* **Task 4.3.B: The Page Sink (Writing)**
+    * **Target Files:** `io.trino.spi.connector.ConnectorPageSink`
+    * **Focus:** Trace how data is sent to a connector for `INSERT` or `CREATE TABLE AS` operations. How does the worker handle transaction commits/rollbacks via the connector?
 
 ---
 
