@@ -4,5 +4,5 @@ A personal study repository for exploring data engine internals — distributed 
 
 ## Engines
 
-- **[Trino](trino-by-rust/)** — Distributed SQL query engine
+- **[Trino](trino/)** — Distributed SQL query engine
 - **[DataFusion](datafusion/)** — Embeddable, extensible query engine in Rust (Apache Arrow)

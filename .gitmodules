@@ -1,5 +1,5 @@
 [submodule "trino"]
-	path = trino-by-rust/trino
+	path = trino/trino
 	url = https://github.com/trinodb/trino.git
 [submodule "datafusion/datafusion"]
 	path = datafusion/datafusion

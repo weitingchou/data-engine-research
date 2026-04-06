@@ -81,7 +81,7 @@ mindmap
 
 ## Detailed Module Breakdown
 
-Base path: `trino-by-rust/trino/`
+Base path: `trino/trino/`
 - `core/trino-main/src/main/java/io/trino/` → abbreviated as `c.t.`
 - `core/trino-spi/src/main/java/io/trino/spi/` → abbreviated as `spi.`
 - `lib/trino-memory-context/src/main/java/io/trino/memory/context/` → abbreviated as `lib.mem.`
