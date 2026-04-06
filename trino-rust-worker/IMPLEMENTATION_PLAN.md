@@ -644,31 +644,71 @@ Each operator implementation follows the decision framework from GOAL.md Section
 
 **Objective:** End-to-end correctness and production readiness.
 
-> **KNOWLEDGE GAP [KG-13]: Trino & DataFusion Test Structure**
-> To validate the Rust worker as a drop-in replacement, we must understand Trino's test hierarchy: which tests exercise worker-level behavior (task execution, operator correctness, wire format, exchange protocol), how integration/e2e tests spin up clusters (`DistributedQueryRunner`), and which tests can be reused or adapted. DataFusion's test structure serves as a reference for idiomatic Rust testing patterns.
-> **Required research tasks:** → `TRINO_TRACING_GUIDE.md` Phase 6 (Tasks 6.1–6.6) and `DATAFUSION_TRACING_GUIDE.md` Phase 6 (Tasks 6.1–6.4)
+**Known from research (KG-13: Trino Phase 6 Tasks 6.1–6.6 + DataFusion Phase 6 Tasks 6.1–6.4):**
 
-#### 9A. Testing Strategy (pending KG-13 resolution)
+Trino uses four test tiers (unit/integration/product/benchmark) with no annotation-based categorization — all selective execution via Maven profiles. `DistributedQueryRunner` is fundamentally in-process (no `addExternalWorker()` method). However, the worker registration protocol is language-agnostic (HTTP `POST /v1/announce`), so a standalone coordinator with `workerCount=0` + `node-scheduler.include-coordinator=false` forces all execution to an externally registered Rust worker. Product tests use Testcontainers with the Tempto framework — `EnvSinglenodeCompatibility` already runs mixed-version clusters.
 
-- [ ] **Protocol conformance tests:** Record real Java worker HTTP request/response pairs; replay against Rust worker; assert byte-level match
-- [ ] **TPC-H / TPC-DS correctness:** Run full benchmark suites against a hybrid cluster (Java coordinator + Rust workers); compare results against all-Java baseline
+**Critical gap:** No byte-level golden fixtures exist anywhere in Trino. All tests verify semantic equality, not exact bytes. No golden hash values exist — all hash tests compare two Java implementations. This is entirely new testing infrastructure the Rust project must build.
+
+DataFusion provides the idiomatic Rust testing reference: sqllogictest (474 `.slt` files), `insta` snapshot testing, `rstest` parametrization, inline `#[cfg(test)]` modules, single integration test binary pattern, and feature-flag-gated test tiers.
+
+#### 9A. Golden File Conformance Suite (new, no equivalent in either engine)
+
+Run the Java Trino implementation to capture reference outputs, hard-code in Rust tests:
+
+- [ ] **Block encoding golden files:** Serialized bytes for all 13 encoding types with known seeds (port `BlockAssertions` seed 633969769)
+- [ ] **Hash function golden values:** Partition hash outputs for known inputs across all types (BIGINT, VARCHAR, DECIMAL, etc.)
+- [ ] **JSON wire type snapshots:** Captured `TaskUpdateRequest`, `TaskStatus`, `TaskInfo`, `PlanFragment`, `SessionRepresentation`, `SplitAssignment` JSON from a running coordinator
+- [ ] **Page binary golden files:** Serialized pages with all compression codecs (none, LZ4, ZSTD)
+- [ ] **Exchange protocol recordings:** Full HTTP request/response pairs (headers + binary body) for fetch/ACK/destroy flows
+
+#### 9B. Hybrid Test Harness (Java coordinator + Rust worker)
+
+- [ ] **Coordinator launcher:** Start a Java Trino coordinator via Docker or `TpchQueryRunner.main()` with `workerCount=0` + `node-scheduler.include-coordinator=false`
+- [ ] **Worker registration:** Rust worker process registers via `POST /v1/announce`, serves `GET /v1/info` with matching version/environment
+- [ ] **TPC-H correctness:** Run Q1–Q22 via Trino REST API, compare results against all-Java baseline
+- [ ] **TPC-DS correctness:** Extended query coverage
 - [ ] **Mixed-cluster testing:** Java and Rust workers in the same cluster; verify shuffle interoperability
-- [ ] **Failure injection:** Kill workers mid-query; verify coordinator detects failure and retries
-- [ ] **Memory pressure testing:** Run queries that exceed worker memory; verify spill/abort behavior
-- [ ] **Performance benchmarking:** Single-node and cluster TPC-H throughput comparison
+- [ ] **sqllogictest adapter:** Two-engine setup — Java Trino as oracle (seed expected results via `--complete`), Rust worker as target
 
-#### 9B. Infrastructure
+#### 9C. Operator-Level Test Infrastructure (`trw-test-utils` crate)
+
+Port key test utilities from both engines:
+
+- [ ] **Operator test driver:** Rust equivalent of Trino's `OperatorAssertion.toPages()` (implements `needsInput → addInput → getOutput` protocol)
+- [ ] **Page builder:** Rust equivalent of `RowPagesBuilder` — fluent API for synthetic input pages
+- [ ] **In-memory spiller:** Rust equivalent of `DummySpillerFactory` — stores pages in `Vec`, counts spill operations
+- [ ] **Mock data source:** Rust equivalent of DataFusion's `TestMemoryExec` — configurable partitions and projections
+- [ ] **Assertion macros:** `assert_batches_eq!`, `assert_batches_sorted_eq!` (from DataFusion)
+- [ ] **Snapshot testing:** `insta` for plan display and error messages
+- [ ] **Parametrized tests:** `rstest` for batch size × join type × spill on/off × data type combinations
+- [ ] **Systematic spill matrix:** Every stateful operator tested with `(spillEnabled, memoryLimit)` combinations
+- [ ] **Cancellation testing:** `BlockingExec` + `assert_is_pending` + `Weak::strong_count` convergence (DataFusion pattern)
+
+#### 9D. Product Test Integration
+
+- [ ] **`EnvMultinodeRustWorker` Docker environment:** Reuse existing coordinator container and Tempto test runner, replace worker container with Rust binary
+- [ ] **Health check:** Replace `jps | grep TrinoServer` with HTTP-based `GET /v1/info` check
+- [ ] **Connector smoke tests:** Run existing Hive/Iceberg/TPCH product test suites unchanged against Rust worker
+
+#### 9E. CI Test Tiers
+
+- [ ] **Tier 1 (every PR):** Unit tests, wire format round-trips, golden file conformance, operator tests — `cargo test`
+- [ ] **Tier 2 (post-merge):** Integration tests requiring Java coordinator, TPC-H correctness, fuzz tests — `cargo test --features integration_tests,extended_tests`
+- [ ] **Tier 3 (nightly):** Product tests via Docker, mixed-cluster shuffle tests, performance benchmarks
+
+#### 9F. Infrastructure
 
 - [ ] **Graceful shutdown:** Drain active tasks before stopping the process
 - [ ] **Logging & tracing:** Structured logging with `tracing` crate; distributed tracing integration
 
-**Milestone:** A multi-node cluster with Rust workers passes TPC-H correctness tests and handles failure scenarios gracefully.
+**Milestone:** A multi-node cluster with Rust workers passes TPC-H Q1–Q22 correctness tests, golden file conformance for all wire formats, and product test suites for Hive/Iceberg connectors.
 
 ---
 
 ## Knowledge Gaps & Required Research
 
-All 12 initial knowledge gaps have been **resolved** via research tasks in the TRINO_TRACING_GUIDE. The findings are now integrated into the phase descriptions above.
+All 13 knowledge gaps have been **resolved** via research tasks in the TRINO_TRACING_GUIDE and DATAFUSION_TRACING_GUIDE. The findings are integrated into the phase descriptions above.
 
 | ID | Gap | Phase | Status | Research Task |
 |----|-----|-------|--------|---------------|
@@ -684,7 +724,7 @@ All 12 initial knowledge gaps have been **resolved** via research tasks in the T
 | KG-10 | HiveSplit / IcebergSplit JSON format | Phase 5 | **RESOLVED** | Task 4.3.C |
 | KG-11 | Partition hash function for shuffle | Phase 6 | **RESOLVED** | Task 4.2.F |
 | KG-12 | Exchange protocol HTTP headers | Phase 6 | **RESOLVED** | Task 4.2.G |
-| KG-13 | Trino & DataFusion test structure | Phase 9 | **OPEN** | Trino Phase 6 (Tasks 6.1–6.6) + DF Phase 6 (Tasks 6.1–6.4) |
+| KG-13 | Trino & DataFusion test structure | Phase 9 | **RESOLVED** | Trino Phase 6 (Tasks 6.1–6.6) + DF Phase 6 (Tasks 6.1–6.4) |
 
 New knowledge gaps discovered during implementation should follow the same process: formulate a research task, append to the tracing guide, execute, then integrate findings before proceeding.
 
@@ -704,4 +744,5 @@ New knowledge gaps discovered during implementation should follow the same proce
 | **Tokio scheduler lacks MLFQ fairness** | Long queries starve short queries under load | Acceptable for initial phases. Mitigate later with custom Tokio runtime hooks or cooperative task budgets. | **Accepted** |
 | **Arrow compute kernels lack Trino function parity** | Incorrect results for edge-case SQL functions | Implement custom kernels for missing functions. Use Trino's test suite as correctness oracle. | **Open** |
 | **Parquet reader performance gap** | Rust worker slower than Java on scan-heavy queries | The `parquet` crate is actively optimized. Profile early; contribute upstream fixes if needed. | **Open** |
-| **Test validation strategy unclear** | No confidence that Rust worker is a correct drop-in | Resolve KG-13: study Trino's test hierarchy, identify reusable test artifacts (JSON payloads, expected results), determine if `DistributedQueryRunner` can host external workers. | **Open** |
+| **No cross-language golden fixtures exist** | Rust wire output may be semantically correct but byte-incompatible | KG-13 resolved: Trino tests verify semantic equality, not bytes. Must build golden file suites from Java (block encodings, hash values, JSON schemas, page binaries). | **Mitigated** |
+| **`DistributedQueryRunner` is in-process only** | Cannot plug Rust worker into existing integration tests | KG-13 resolved: Use standalone coordinator + HTTP announce protocol with `workerCount=0`. Product tests can inject via `EnvMultinodeRustWorker` Docker environment. | **Mitigated** |
