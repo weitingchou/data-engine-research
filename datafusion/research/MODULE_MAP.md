@@ -21,58 +21,58 @@
 
 ## Mind Map
 
-Modules are plain text, structs/traits are wrapped in `[brackets]`.
+Modules are plain text, key structs/traits listed beneath each module.
 
 ```mermaid
 mindmap
   root((DataFusion Library))
     Session & Context
-      (#91;SessionContext#93;)
-      (#91;SessionState#93;)
-      (#91;TaskContext#93;)
-      (#91;RuntimeEnv#93;)
+      SessionContext
+      SessionState
+      TaskContext
+      RuntimeEnv
     SQL Frontend
-      (#91;DFParser#93;)
-      (#91;SqlToRel#93;)
-      (#91;Statement#93;)
+      DFParser
+      SqlToRel
+      Statement
     Logical Plan & Optimizer
-      (#91;LogicalPlan#93;)
-      (#91;Expr#93;)
-      (#91;Analyzer#93;)
-      (#91;Optimizer#93;)
+      LogicalPlan
+      Expr
+      Analyzer
+      Optimizer
     Physical Plan Compilation
-      (#91;PhysicalPlanner#93;)
-      (#91;ExecutionPlan#93;)
-      (#91;PhysicalExpr#93;)
-      (#91;PhysicalOptimizer#93;)
+      PhysicalPlanner
+      ExecutionPlan
+      PhysicalExpr
+      PhysicalOptimizer
     Execution Engine
-      (#91;execute()#93;)
-      (#91;SendableRecordBatchStream#93;)
-      (#91;Tokio Runtime#93;)
+      execute
+      SendableRecordBatchStream
+      Tokio Runtime
     Data Model
-      (#91;RecordBatch#93;)
-      (#91;ArrayRef#93;)
-      (#91;Arrow Buffer#93;)
-      (#91;ScalarValue#93;)
+      RecordBatch
+      ArrayRef
+      Arrow Buffer
+      ScalarValue
     Data Exchange
-      (#91;RepartitionExec#93;)
-      (#91;CoalescePartitionsExec#93;)
-      (#91;SortPreservingMergeExec#93;)
+      RepartitionExec
+      CoalescePartitionsExec
+      SortPreservingMergeExec
     Catalog & Data Sources
-      (#91;CatalogProvider#93;)
-      (#91;TableProvider#93;)
-      (#91;ListingTable#93;)
-      (#91;ParquetExec#93;)
+      CatalogProvider
+      TableProvider
+      ListingTable
+      ParquetExec
     Memory Management
-      (#91;MemoryPool#93;)
-      (#91;MemoryReservation#93;)
-      (#91;DiskManager#93;)
-      (#91;SpillManager#93;)
+      MemoryPool
+      MemoryReservation
+      DiskManager
+      SpillManager
     Function Registry
-      (#91;ScalarUDF#93;)
-      (#91;AggregateUDF#93;)
-      (#91;WindowUDF#93;)
-      (#91;FunctionRegistry#93;)
+      ScalarUDF
+      AggregateUDF
+      WindowUDF
+      FunctionRegistry
 ```
 
 ---
