@@ -80,27 +80,33 @@ This is an atomic task list for analyzing the Apache DataFusion source code (and
 
 ---
 
-## Phase 3: The Operator Pipeline (Physical Plan Execution)
-**Objective:** Trace the physical data processing nodes to understand streaming query execution.
+## Phase 3: Operator Internals & Compute (Physical Plan Execution)
+**Objective:** Trace the Async Volcano execution model. Map how `poll_next()` orchestrates simple nested pipelines, how complex pipelines handle asynchronous state boundaries, and how Arrow kernels execute the math.
 
-* **Task 3.1.A: Physical Expressions (`PhysicalExpr`)**
-  * **Target Crates/Files:** `datafusion-physical-expr/src/physical_expr.rs`
-  * **Focus:** Analyze how column references and scalar math are evaluated against a `RecordBatch`. Trace the `evaluate()` method.
-* **Task 3.2.A: Simple Projection & Filtering**
-  * **Target Crates/Files:** `datafusion-physical-plan/src/filter.rs`, `datafusion-physical-plan/src/projection.rs`
-  * **Focus:** Trace the simplest data flow: taking an input stream, applying a boolean mask (Filter), and returning a transformed `RecordBatch` (Projection).
-* **Task 3.3.A: Hash Join - Building the Table**
-  * **Target Crates/Files:** `datafusion-physical-plan/src/joins/hash_join.rs` (focus on build-side logic)
-  * **Focus:** How does DataFusion ingest the "build" side of a join? Analyze the `JoinHashMap` structure and how it stores indices.
-* **Task 3.3.B: Hash Join - Probing**
-  * **Target Crates/Files:** `datafusion-physical-plan/src/joins/hash_join.rs` (focus on probe-side logic)
-  * **Focus:** How does the "probe" side stream through and match against the built hash table? Trace the batch-level joining logic.
-* **Task 3.4.A: Aggregation & Accumulators**
-  * **Target Crates/Files:** `datafusion-physical-plan/src/aggregates/mod.rs`, `datafusion-physical-expr/src/aggregate/accumulator.rs`
-  * **Focus:** How does an `AggregateExec` maintain group-by state? Analyze the `Accumulator` trait (`update_batch`, `evaluate`).
-* **Task 3.5.A: Sorting and Spilling Mechanism**
-  * **Target Crates/Files:** `datafusion-physical-plan/src/sorts/sort.rs`, `datafusion-physical-plan/src/sorts/sort_preserving_merge.rs`
-  * **Focus:** When sorting data that exceeds memory, how does `SortExec` serialize its state to disk? Trace the spilling trigger and temp file creation.
+### The Async Volcano Contract
+* **Task 3.1: The Async Volcano Contract (`Stream`)**
+  * **Target Crates/Files:** `datafusion-physical-plan` (`src/stream.rs`), `futures` library (conceptually)
+  * **Focus:** Analyze the `RecordBatchStream` trait. How does it extend Rust's `Stream`? Trace how the `poll_next()` macro `ready!` is used to bubble up `Poll::Pending` states asynchronously. Document the exact mechanical differences between Trino's explicit `addInput/getOutput` and DataFusion's implicit `poll_next()`.
+
+### Physical Expressions & Compute
+* **Task 3.2: Physical Expressions & Compute Kernels**
+  * **Target Crates/Files:** `datafusion-physical-expr` (`src/expressions/mod.rs`, `src/physical_expr.rs`), `arrow-ord` / `arrow-arith`
+  * **Focus:** Analyze the `PhysicalExpr` trait and its `evaluate()` method. Trace a simple filter predicate. How does it evaluate to a `BooleanArray`? Trace the subsequent call to `arrow::compute::filter_record_batch` to see the SIMD application.
+
+### Simple Pipelines
+* **Task 3.3: Simple Pipelines (Stateless Stream Nesting)**
+  * **Target Crates/Files:** `datafusion-physical-plan` (`src/filter.rs`, `src/projection.rs`)
+  * **Focus:** Trace the `poll_next()` loop in `FilterExecStream`. How does it pull a batch, apply the mask, and yield the result without row-by-row iteration? Confirm the zero-copy nature of `ProjectionExecStream`. Contrast this nested struct model with Trino's fused `ScanFilterAndProjectOperator`.
+
+### Complex Pipelines
+* **Task 3.4: Complex Pipelines (Stateful Breakers & Joins)**
+  * **Target Crates/Files:** `datafusion-physical-plan` (`src/joins/hash_join.rs`, `src/aggregates/mod.rs`)
+  * **Focus:** Trace `HashJoinExec`. How does the async state machine transition between the Build phase and the Probe phase inside its `poll_next()` implementation? Trace the construction of the `JoinHashMap` and see if `tokio::spawn` is used to collect the build side concurrently.
+
+### Disk Spilling
+* **Task 3.5: Proactive Disk Spilling**
+  * **Target Crates/Files:** `datafusion-physical-plan` (`src/sorts/sort.rs`, `src/spill.rs`), `datafusion-execution` (`src/disk_manager.rs`)
+  * **Focus:** Trace `ExternalSorter` (used by `SortExec`). Trace the exact failure path of `try_grow()`. How does the operator initiate `spill_to_disk()`? Look at how the `DiskManager` writes and later re-reads the `arrow-ipc` format.
 
 ---
 
