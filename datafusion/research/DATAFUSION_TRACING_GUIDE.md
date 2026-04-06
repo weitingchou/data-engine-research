@@ -160,3 +160,47 @@ This is an atomic task list for analyzing the Apache DataFusion source code (and
 * **Task 5.4: Task Context and Global Limits**
   * **Target Crates/Files:** `datafusion-execution` (`src/task.rs`), `datafusion-common` (`src/config.rs`)
   * **Focus:** Trace how the `MemoryPool` is instantiated and attached to the `TaskContext`. How are global memory limits defined in the `SessionConfig` and passed down to the physical execution plan?
+
+---
+
+## Phase 6: Test Infrastructure & Validation Patterns `[KG-13]`
+**Objective:** Map DataFusion's test hierarchy and idiomatic Rust testing patterns. This serves as a reference for designing the Rust worker's test suite — particularly for unit-testing operators in isolation, property-based testing of serialization, and integration-testing via sqllogictest.
+
+### Task 6.1: Test Hierarchy, Frameworks & CI
+* **Task 6.1.A: Test Organization & Infrastructure**
+    * **Target Crates/Files:** Workspace `Cargo.toml` (test configuration), `.github/` (CI workflows), `datafusion/core/tests/`, `datafusion/sqllogictest/`, per-crate `#[cfg(test)]` modules
+    * **Focus:** Map the complete test taxonomy:
+      1. What test categories exist? (unit tests via `#[cfg(test)]`, integration tests via `tests/` directories, sqllogictest, benchmarks)
+      2. How are tests organized? (per-crate `#[cfg(test)]` modules vs. `tests/` directories vs. dedicated test crates)
+      3. How is sqllogictest used? What `.slt` files exist and what do they cover? How are expected results maintained?
+      4. What CI infrastructure runs these tests? (GitHub Actions workflows, test matrix, feature flags)
+      5. How are test fixtures and shared utilities organized? (`datafusion/core/tests/data/`, shared test helpers)
+
+### Task 6.2: Data Model & Serialization Tests (aligns with Impl Phase 1)
+* **Task 6.2.A: Arrow Serialization & Round-Trip Tests**
+    * **Target Crates/Files:** `arrow-rs` test modules (buffer, array round-trips), `datafusion-proto/src/` (protobuf serialization tests), `datafusion/core/tests/` (IPC/Parquet round-trips)
+    * **Focus:** How data model correctness is validated:
+      1. How are Arrow array round-trips tested? (construct → serialize → deserialize → assert equality)
+      2. How does `datafusion-proto` test plan serialization/deserialization fidelity?
+      3. Are there property-based or fuzz tests for serialization?
+      4. What test utilities exist for constructing test `RecordBatch` instances?
+
+### Task 6.3: Operator & Expression Tests (aligns with Impl Phases 4-5, 8)
+* **Task 6.3.A: Operator & Expression Testing Patterns**
+    * **Target Crates/Files:** `datafusion/physical-plan/src/` (operator `#[cfg(test)]` modules), `datafusion/physical-expr/src/` (expression tests), `datafusion/core/tests/`
+    * **Focus:** How individual components are tested:
+      1. How are operators tested in isolation? (synthetic `RecordBatch` input, `collect()` output, assertion patterns)
+      2. How are physical expressions tested? (direct evaluation tests, edge cases, null handling)
+      3. What test utility functions exist? (`assert_batches_eq`, `assert_batches_sorted_eq`, `partitions_to_sorted_vec`)
+      4. How are stateful operators tested (joins, aggregations, sorts) — do tests cover spill paths?
+      5. Are there parameterized tests that run operators across multiple data types?
+
+### Task 6.4: Integration & Correctness Tests (aligns with Impl Phase 9)
+* **Task 6.4.A: SQL-Level Correctness & Reference Validation**
+    * **Target Crates/Files:** `datafusion/sqllogictest/`, `datafusion/core/tests/sql/`, benchmarks
+    * **Focus:** How end-to-end SQL correctness is validated:
+      1. How does DataFusion use sqllogictest for correctness testing against Postgres as reference?
+      2. What query coverage do the `.slt` files provide? (DML, DDL, window functions, subqueries, etc.)
+      3. How are TPC-H queries used for validation and benchmarking?
+      4. What patterns could the Rust worker adopt for validating query-level correctness against the Java Trino coordinator?
+      5. How are regression tests structured when a bug is found and fixed?

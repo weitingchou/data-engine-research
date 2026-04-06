@@ -284,3 +284,77 @@ How the worker interacts with the SPI (Service Provider Interface) to get raw da
     * **Target Files:** `io.trino.memory.ClusterMemoryManager`, `io.trino.memory.LowMemoryKiller`
     * **Focus:** This requires jumping to the Coordinator. How does the coordinator aggregate the `MemoryInfo` from all workers? Trace the logic in `ClusterMemoryManager` when a worker reports a "blocked" state. How does the `LowMemoryKiller` select a victim, and how is the "kill" signal propagated back down the Control Plane (Phase 4) to the workers?
 
+---
+
+## Phase 6: Test Infrastructure & Validation Strategy `[KG-13]`
+**Objective:** Map Trino's complete test hierarchy to understand how correctness is validated at every level — from individual block encodings to full distributed queries. This is critical for determining which existing tests can validate the Rust worker as a drop-in replacement, which need adaptation, and where new cross-language test harnesses are required.
+
+### Task 6.1: Test Hierarchy, Frameworks & CI
+* **Task 6.1.A: Test Hierarchy & Organization**
+    * **Target Files:** Top-level `pom.xml` (test profiles, surefire/failsafe config), `testing/trino-testing/`, `testing/trino-testing-services/`, `testing/trino-tests/`, `testing/trino-product-tests/`, `.github/` (CI workflows)
+    * **Focus:** Map the complete test taxonomy:
+      1. What test categories exist? (unit tests, integration tests, product tests, benchmark tests, etc.)
+      2. What frameworks are used? (JUnit 5, TestNG, AssertJ, etc.)
+      3. How are tests categorized and selectively run? (Maven profiles, surefire groups, `@Tag` annotations?)
+      4. What is the directory structure convention? (`src/test/java/` placement, test module organization)
+      5. What CI infrastructure runs these tests? (GitHub Actions workflows, test matrix)
+
+### Task 6.2: Data Model & Wire Format Tests (aligns with Impl Phase 1)
+* **Task 6.2.A: Block & Page Serialization Tests**
+    * **Target Files:** `core/trino-main/src/test/java/io/trino/block/` (block encoding tests), `core/trino-main/src/test/java/io/trino/execution/buffer/` (page serialization tests), `lib/trino-orc/src/test/` (if wire format tested via ORC path)
+    * **Focus:** Identify tests that validate wire-level data correctness:
+      1. Are there round-trip tests for each of the 13 block encoding types (`LONG_ARRAY`, `VARIABLE_WIDTH`, `DICTIONARY`, etc.)?
+      2. How are null bitmaps tested (especially the MSB-first convention)?
+      3. Are there tests for the 16-byte HTTP envelope, xxHash64 checksum, 64KB chunk compression?
+      4. Are there cross-version compatibility tests (serialized bytes from one version deserialized by another)?
+      5. What test data generators exist for `Block` and `Page` objects? (random generators, edge-case builders)
+
+### Task 6.3: Control Plane & Task Lifecycle Tests (aligns with Impl Phases 2-3)
+* **Task 6.3.A: Task & REST Endpoint Tests**
+    * **Target Files:** `core/trino-main/src/test/java/io/trino/execution/` (task tests), `core/trino-main/src/test/java/io/trino/server/` (REST endpoint tests)
+    * **Focus:** Identify tests for the control plane:
+      1. Task lifecycle tests (`TestSqlTask`, `TestSqlTaskManager`) — do they create real tasks with plan fragments?
+      2. JSON serialization tests — are there tests that serialize/deserialize `TaskUpdateRequest`, `TaskStatus`, `PlanFragment`, and assert structure?
+      3. REST endpoint tests — are `TaskResource` endpoints tested in isolation? With what test harness?
+      4. Plan fragment parsing tests — are there tests that deserialize specific plan node types from JSON?
+      5. Expression evaluation tests — how are expression compilation and evaluation tested?
+
+### Task 6.4: Operator & Execution Tests (aligns with Impl Phases 4-5, 8)
+* **Task 6.4.A: Operator Correctness Tests**
+    * **Target Files:** `core/trino-main/src/test/java/io/trino/operator/` (operator tests), `core/trino-main/src/test/java/io/trino/sql/planner/` (planner integration tests)
+    * **Focus:** Understand how individual operators are validated:
+      1. How are operators tested in isolation? (synthetic input pages? mock drivers? `OperatorAssertion` utilities?)
+      2. What is the `OperatorAssertion` / `TestingOperatorContext` test infrastructure?
+      3. How are stateful operators tested (joins, aggregations) — do tests cover spill paths?
+      4. How are edge cases tested (null handling, empty pages, single-row pages, large pages)?
+      5. Are there parameterized tests that run the same operator across multiple data types?
+
+### Task 6.5: Data Plane & Shuffle Tests (aligns with Impl Phase 6)
+* **Task 6.5.A: Exchange Protocol & Partition Hash Tests**
+    * **Target Files:** `core/trino-main/src/test/java/io/trino/exchange/` (exchange tests), `core/trino-main/src/test/java/io/trino/operator/output/` (output buffer tests), `core/trino-main/src/test/java/io/trino/type/` (hash function tests)
+    * **Focus:** Identify tests for the data plane:
+      1. Are there tests for the token-based pull protocol (sequence tokens, ACK, buffer destroy)?
+      2. Are there tests for the 7 custom HTTP headers?
+      3. Are there tests for the partition hash function that assert specific hash values for known inputs? (Critical for cross-language validation)
+      4. Are there tests for `OutputBuffer` back-pressure behavior?
+      5. What test artifacts (recorded page binaries, expected hash values) could be extracted for Rust-side property tests?
+
+### Task 6.6: Integration & End-to-End Tests (aligns with Impl Phase 9)
+* **Task 6.6.A: `DistributedQueryRunner` & Query Assertions**
+    * **Target Files:** `testing/trino-testing/src/main/java/io/trino/testing/DistributedQueryRunner.java`, `testing/trino-testing/src/main/java/io/trino/testing/AbstractTestQueries.java`, `testing/trino-testing/src/main/java/io/trino/testing/QueryAssertions.java`, `testing/trino-tests/src/test/java/io/trino/tests/`
+    * **Focus:** Understand how full end-to-end query tests work:
+      1. How does `DistributedQueryRunner` spin up a coordinator + workers in-process? Can it use out-of-process workers?
+      2. What is `AbstractTestQueries` and how do connector-specific test classes extend it?
+      3. How does `QueryAssertions` validate query results? (`MaterializedResult` comparison, row ordering, type matching)
+      4. How are TPC-H/TPC-DS queries used for validation? (`AbstractTestTpchQueries`, `TestDistributedQueriesTpch`)
+      5. Can the Rust worker be tested by replacing the Java worker in `DistributedQueryRunner`, or must we build an external test harness?
+
+* **Task 6.6.B: Product Tests & Cross-Compatibility**
+    * **Target Files:** `testing/trino-product-tests/`, `testing/trino-product-tests-launcher/`, connector-specific test modules
+    * **Focus:** Understand the outer-loop test infrastructure:
+      1. What are product tests? How are they structured? (Docker-based? Tempto framework?)
+      2. What connectors are covered by product tests (Hive, Iceberg, Delta, TPCH)?
+      3. How could product tests be adapted to use an external Rust worker process?
+      4. What test artifacts (SQL scripts, expected results, Docker compose files) could be reused?
+      5. Are there any mixed-version or mixed-implementation tests already in the codebase?
+

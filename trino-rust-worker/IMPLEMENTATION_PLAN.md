@@ -644,12 +644,21 @@ Each operator implementation follows the decision framework from GOAL.md Section
 
 **Objective:** End-to-end correctness and production readiness.
 
+> **KNOWLEDGE GAP [KG-13]: Trino & DataFusion Test Structure**
+> To validate the Rust worker as a drop-in replacement, we must understand Trino's test hierarchy: which tests exercise worker-level behavior (task execution, operator correctness, wire format, exchange protocol), how integration/e2e tests spin up clusters (`DistributedQueryRunner`), and which tests can be reused or adapted. DataFusion's test structure serves as a reference for idiomatic Rust testing patterns.
+> **Required research tasks:** → `TRINO_TRACING_GUIDE.md` Phase 6 (Tasks 6.1–6.6) and `DATAFUSION_TRACING_GUIDE.md` Phase 6 (Tasks 6.1–6.4)
+
+#### 9A. Testing Strategy (pending KG-13 resolution)
+
 - [ ] **Protocol conformance tests:** Record real Java worker HTTP request/response pairs; replay against Rust worker; assert byte-level match
 - [ ] **TPC-H / TPC-DS correctness:** Run full benchmark suites against a hybrid cluster (Java coordinator + Rust workers); compare results against all-Java baseline
 - [ ] **Mixed-cluster testing:** Java and Rust workers in the same cluster; verify shuffle interoperability
 - [ ] **Failure injection:** Kill workers mid-query; verify coordinator detects failure and retries
 - [ ] **Memory pressure testing:** Run queries that exceed worker memory; verify spill/abort behavior
 - [ ] **Performance benchmarking:** Single-node and cluster TPC-H throughput comparison
+
+#### 9B. Infrastructure
+
 - [ ] **Graceful shutdown:** Drain active tasks before stopping the process
 - [ ] **Logging & tracing:** Structured logging with `tracing` crate; distributed tracing integration
 
@@ -675,6 +684,7 @@ All 12 initial knowledge gaps have been **resolved** via research tasks in the T
 | KG-10 | HiveSplit / IcebergSplit JSON format | Phase 5 | **RESOLVED** | Task 4.3.C |
 | KG-11 | Partition hash function for shuffle | Phase 6 | **RESOLVED** | Task 4.2.F |
 | KG-12 | Exchange protocol HTTP headers | Phase 6 | **RESOLVED** | Task 4.2.G |
+| KG-13 | Trino & DataFusion test structure | Phase 9 | **OPEN** | Trino Phase 6 (Tasks 6.1–6.6) + DF Phase 6 (Tasks 6.1–6.4) |
 
 New knowledge gaps discovered during implementation should follow the same process: formulate a research task, append to the tracing guide, execute, then integrate findings before proceeding.
 
@@ -694,3 +704,4 @@ New knowledge gaps discovered during implementation should follow the same proce
 | **Tokio scheduler lacks MLFQ fairness** | Long queries starve short queries under load | Acceptable for initial phases. Mitigate later with custom Tokio runtime hooks or cooperative task budgets. | **Accepted** |
 | **Arrow compute kernels lack Trino function parity** | Incorrect results for edge-case SQL functions | Implement custom kernels for missing functions. Use Trino's test suite as correctness oracle. | **Open** |
 | **Parquet reader performance gap** | Rust worker slower than Java on scan-heavy queries | The `parquet` crate is actively optimized. Profile early; contribute upstream fixes if needed. | **Open** |
+| **Test validation strategy unclear** | No confidence that Rust worker is a correct drop-in | Resolve KG-13: study Trino's test hierarchy, identify reusable test artifacts (JSON payloads, expected results), determine if `DistributedQueryRunner` can host external workers. | **Open** |
