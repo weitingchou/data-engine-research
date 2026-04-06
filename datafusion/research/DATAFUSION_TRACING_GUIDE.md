@@ -41,35 +41,42 @@ This is an atomic task list for analyzing the Apache DataFusion source code (and
 
 ---
 
-## Phase 2: Worker Scheduling (Execution Model)
-**Objective:** Map the relationship between Execution Plans, Partitions, and Async Streams to understand DataFusion's pull-based execution model.
+## Phase 2: Execution Model Tracing Guide (DataFusion)
+**Objective:** Trace the physical plan instantiation and the async stream execution pipeline. Understand how DataFusion leverages `tokio` for concurrency instead of building custom task schedulers.
 
-### 2.1 Plan Partitioning & Task Context
-* **Task 2.1.A: The `ExecutionPlan` & Partitioning**
-  * **Target Crates/Files:** `datafusion-physical-plan/src/lib.rs` (focus on `ExecutionPlan` and `Partitioning`)
-  * **Focus:** How does a physical plan define its level of concurrency? Trace the `output_partitioning()` method to understand how an operator declares how many parallel streams (drivers) it can produce.
-* **Task 2.1.B: `TaskContext` Initialization & Resource Wiring**
-  * **Target Crates/Files:** `datafusion-execution/src/task.rs` (focus on `TaskContext` and `SessionConfig`)
-  * **Focus:** Trace how a `TaskContext` is wired up before execution begins. How does it link the `MemoryPool`, `DiskManager`, and session properties to the execution of a specific partition?
+### Physical Plan Contract
+* **Task 2.1: The Physical Plan Contract (`ExecutionPlan` & Partitioning)**
+  * **Target Crates/Files:** `datafusion-physical-plan` (`src/lib.rs`, `src/execution_plan.rs`), `datafusion-physical-expr` (`src/partitioning.rs`)
+  * **Focus:** Analyze the `ExecutionPlan` trait. Look at `properties()` (which defines partitioning and ordering via `PlanProperties`) and the `execute()` method. How does `execute()` take a partition index and a `TaskContext` to return a `SendableRecordBatchStream`? Trace how `output_partitioning()` declares the degree of concurrency. Analyze the `Partitioning` enum (`RoundRobinBatch`, `Hash`, `UnknownPartitioning`) and the `Distribution` enum. How does the optimizer bridge the gap between `required_input_distribution()` and `output_partitioning()` by inserting `RepartitionExec` or `CoalescePartitionsExec`?
 
-### 2.2 Async Task Spawning
-* **Task 2.2.A: Tokio Task Spawning**
-  * **Target Crates/Files:** `datafusion-physical-plan/src/lib.rs` or operator-specific files like `datafusion-physical-plan/src/repartition/mod.rs`
-  * **Focus:** How are multiple partitions mapped to actual CPU threads? Find the exact mechanisms where DataFusion uses `tokio::spawn` or `tokio::task::spawn_blocking` to hand off work to the async runtime.
-* **Task 2.2.B: Task Cancellation & Failure Propagation**
-  * **Target Crates/Files:** `datafusion-execution/src/task.rs` (focus on `JoinHandle` or cancellation logic)
-  * **Focus:** If one partition fails or the query is aborted, how is the failure propagated? Trace how dropping a Rust `Future` or aborting a Tokio task handles the teardown.
+### Execution Context
+* **Task 2.2: The Execution Context (`TaskContext` & Resource Wiring)**
+  * **Target Crates/Files:** `datafusion-execution` (`src/task.rs`, `src/runtime_env.rs`)
+  * **Focus:** Trace the `TaskContext`. How is it wired up before execution begins? How does it link the `MemoryPool`, `DiskManager`, `ObjectStoreRegistry`, and session properties to the execution of a specific partition? Compare it to Trino's `DriverContext` — notice how lightweight it is, relying on Rust's call stack rather than a complex tracking tree.
 
-### 2.3 The Stream Lifecycle
+### The Stream Lifecycle
 * **Task 2.3.A: Stream Initialization**
-  * **Target Crates/Files:** `datafusion-physical-plan/src/stream.rs` (focus on `RecordBatchStream`)
-  * **Focus:** How is an operator instantiated into an active stream? Trace the `execute(partition: usize, context: Arc<TaskContext>)` method across a core operator (like Filter or Projection).
+  * **Target Crates/Files:** `datafusion-physical-plan` (`src/stream.rs`, `src/filter.rs`, `src/projection.rs`)
+  * **Focus:** How is an operator instantiated into an active stream? Trace `FilterExec::execute()` — it returns a `FilterExecStream`. How does `RecordBatchStreamAdapter` wrap arbitrary futures into streams? Trace how the nested stream chain is constructed when `execute()` calls its child's `execute()`.
 * **Task 2.3.B: The Pull-Based Execution Loop (`poll_next`)**
-  * **Target Crates/Files:** `datafusion-physical-plan/src/stream.rs` and `std::task::Poll` implementations
-  * **Focus:** This is the core engine loop. Trace how `poll_next()` is called. Document exactly where the stream hits an `.await` point (yielding control back to the Tokio executor) when waiting for upstream data or disk I/O.
-* **Task 2.3.C: Stream Termination & Cleanup**
-  * **Target Crates/Files:** Implementations of `RecordBatchStream` in specific operators.
-  * **Focus:** When is a stream considered finished? Trace the path when `poll_next()` finally returns `Poll::Ready(None)`, and analyze how `MemoryReservation` drops automatically release memory back to the `TaskContext`.
+  * **Target Crates/Files:** `datafusion-physical-plan` (`src/stream.rs`, `src/filter.rs`), `datafusion-physical-expr-common` (`src/metrics/baseline.rs`)
+  * **Focus:** This is the core engine loop. Trace how `poll_next()` cascades down the stream chain. Note how the `ready!` macro bubbles up `Poll::Pending` asynchronously. Document where the stream hits `.await` points that yield control back to Tokio. Contrast with Trino's `Driver` loop manually checking `operator.needsInput()` and `operator.isBlocked()`. How does `BaselineMetrics::record_poll()` wrap every stream for observability?
+* **Task 2.3.C: Stream Termination & Cancellation**
+  * **Target Crates/Files:** `datafusion-physical-plan` (operator stream implementations), `datafusion-common-runtime` (`src/common.rs`, `src/join_set.rs`)
+  * **Focus:** Two shutdown paths: normal completion and cancellation. For normal completion, trace the path when `poll_next()` returns `Poll::Ready(None)` — how do `MemoryReservation` drops automatically release memory back to the pool? For cancellation, trace the drop-based protocol: how does `SpawnedTask`'s abort-on-drop guarantee cleanup? How do channel closures propagate shutdown to background tasks? Contrast with Trino's explicit `CANCELING → CANCELED` state machine and `DriverAndTaskTerminationTracker`.
+
+### Intra-Node Concurrency
+* **Task 2.4.A: Tokio Task Spawning**
+  * **Target Crates/Files:** `datafusion-common-runtime` (`src/common.rs`, `src/join_set.rs`), `datafusion-physical-plan` (`src/common.rs`, `src/execution_plan.rs`)
+  * **Focus:** How are multiple partitions mapped to actual CPU threads? Trace `SpawnedTask` (abort-on-drop wrapper around `tokio::task::JoinHandle`), `JoinSet` (managed task set), `spawn_buffered()` (channel-based stream decoupling), and `collect_partitioned()` (one Tokio task per partition). Why is raw `tokio::spawn` banned in operator code?
+* **Task 2.4.B: Local Repartitioning (The Exchange)**
+  * **Target Crates/Files:** `datafusion-physical-plan` (`src/repartition/mod.rs`)
+  * **Focus:** Trace `RepartitionExec`. How does it take `N` input streams and map them to `M` output streams? Analyze how it uses `tokio::sync::mpsc` channels to move `RecordBatch`es across thread boundaries. How does it handle backpressure (channel capacity)? How does hash vs. round-robin routing work?
+
+### Distributed Orchestration
+* **Task 2.5: Distributed Orchestration Context (Optional)**
+  * **Target Repository:** `apache/datafusion-ballista` or `apache/datafusion-ray`
+  * **Focus:** Briefly look at how an external scheduler wraps DataFusion. How does Ballista take an `ExecutionPlan`, break it at `ShuffleWriterExec` boundaries, and distribute those as tasks to remote executors?
 
 ---
 

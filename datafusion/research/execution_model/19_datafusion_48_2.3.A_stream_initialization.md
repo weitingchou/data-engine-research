@@ -2,7 +2,7 @@
 
 ## 0. Research Focus
 * **Task ID:** 2.3.A
-* **Focus:** How is an operator instantiated into an active stream? Trace the `execute(partition: usize, context: Arc<TaskContext>)` method across core operators (Filter and Projection).
+* **Focus:** How is an operator instantiated into an active stream? Trace `FilterExec::execute()` — it returns a `FilterExecStream`. How does `RecordBatchStreamAdapter` wrap arbitrary futures into streams? Trace how the nested stream chain is constructed when `execute()` calls its child's `execute()`.
 
 ## 1. High-Level Overview
 * **Core Responsibility:** Stream initialization is the transition from a static `ExecutionPlan` node to a live, pollable async stream. Each operator's `execute()` method is synchronous — it creates a stream struct, wires up its dependencies (by recursively calling `input.execute()`), and returns it wrapped in `Box::pin()`. The returned `SendableRecordBatchStream` is a type alias for `Pin<Box<dyn RecordBatchStream + Send>>`, which is the universal stream type across the entire execution engine.
@@ -76,7 +76,7 @@ classDiagram
 ### Sequence Diagram: Recursive Stream Initialization
 ```mermaid
 sequenceDiagram
-    participant API as execute_stream()
+    participant API as execute_stream
     participant Proj as ProjectionExec
     participant Filter as FilterExec
     participant Scan as DataSourceExec
@@ -92,7 +92,7 @@ sequenceDiagram
     Filter-->>Proj: Box::pin(FilterExecStream)
     Note over Proj: Creates ProjectionStream<br/>with FilterExecStream as input
     Proj-->>API: Box::pin(ProjectionStream)
-    Note over API: Streams are nested:<br/>Proj → Filter → Scan
+    Note over API: Streams are nested:<br/>Proj -> Filter -> Scan
 ```
 
 ### FilterExec::execute() — Full Implementation
@@ -247,9 +247,87 @@ where
 
 This is used extensively by operators that construct their output using `futures::stream::once(async { ... }).try_flatten()` patterns (e.g., `SortExec`).
 
+### SortExec::execute() — The Accumulate-Then-Emit Pattern
+
+Unlike pass-through operators, `SortExec` must consume all input before emitting any output. It uses `futures::stream::once(async { ... }).try_flatten()` to defer accumulation:
+
+```rust
+// sorts/sort.rs:1319-1339
+fn execute(&self, partition: usize, context: Arc<TaskContext>) -> Result<SendableRecordBatchStream> {
+    let mut input = self.input.execute(partition, Arc::clone(&context))?;
+    let mut sorter = ExternalSorter::new(partition, input.schema(), self.expr.clone(),
+        context.session_config().batch_size(),
+        execution_options.sort_spill_reservation_bytes,
+        execution_options.sort_in_place_threshold_bytes,
+        context.session_config().spill_compression(),
+        &self.metrics_set, context.runtime_env(),
+    )?;
+
+    Ok(Box::pin(RecordBatchStreamAdapter::new(
+        self.schema(),
+        futures::stream::once(async move {
+            while let Some(batch) = input.next().await {
+                let batch = batch?;
+                sorter.insert_batch(batch).await?;  // Accumulate ALL input (may spill)
+            }
+            sorter.sort().await  // Then emit sorted results as a stream
+        })
+        .try_flatten(),  // Flatten Result<SendableRecordBatchStream> into stream of batches
+    )))
+}
+```
+
+The `once(async { ... }).try_flatten()` pattern: `once()` creates a stream that yields one item — the async closure's return value (a `Result<SendableRecordBatchStream>`). `try_flatten()` unwraps the `Ok(stream)` into the actual batch stream. This is how SortExec defers its accumulation phase to the first `poll_next()` call while keeping `execute()` synchronous.
+
+**Dual MemoryReservation:** `ExternalSorter` holds two reservations — a spillable main reservation for buffering input batches, and a non-spillable merge reservation pre-allocated for the final merge phase. This ensures the merge always has memory even if the main buffer fills up.
+
+### HashJoinExec::execute() — The Dual-Input Pattern
+
+Hash joins have two inputs: a build side (collected into a hash table) and a probe side (streamed through):
+
+```rust
+// joins/hash_join/exec.rs:1319-1437 (simplified)
+fn execute(&self, partition: usize, context: Arc<TaskContext>) -> Result<SendableRecordBatchStream> {
+    // Build side: wrapped in OnceFut for lazy, shared collection
+    let left_fut = match self.mode {
+        PartitionMode::CollectLeft => self.left_fut.try_once(|| {
+            let left_stream = self.left.execute(0, Arc::clone(&context))?;
+            let reservation = MemoryConsumer::new("HashJoinInput").register(...);
+            Ok(collect_left_input(left_stream, reservation, ...))
+        })?,
+        PartitionMode::Partitioned => {
+            let left_stream = self.left.execute(partition, Arc::clone(&context))?;
+            OnceFut::new(collect_left_input(left_stream, ...))
+        }
+    };
+
+    // Probe side: executed immediately (streaming, not accumulated)
+    let right_stream = self.right.execute(partition, context)?;
+
+    Ok(Box::pin(HashJoinStream::new(
+        right_stream,
+        HashJoinStreamState::WaitBuildSide,  // Initial state: wait for build
+        BuildSide::Initial(BuildSideInitialState { left_fut }),
+        ...
+    )))
+}
+```
+
+`OnceFut` wraps the build-side future in `futures::future::Shared`, allowing multiple output partitions to share the same build-side result. The `HashJoinStream` starts in `WaitBuildSide` state and transitions through: `WaitBuildSide` -> `FetchProbeBatch` -> `ProcessProbeBatch` -> `ExhaustedProbeSide` -> `Completed`.
+
+### Operator Initialization Pattern Summary
+
+| Pattern | Example | execute() Behavior |
+|---|---|---|
+| **Pass-through** | FilterExec, ProjectionExec | Calls `input.execute()`, wraps in stream struct |
+| **Accumulate-then-emit** | SortExec, TopK | `once(async { consume_all; sort }).try_flatten()` |
+| **Dual-input** | HashJoinExec | Build side via `OnceFut`, probe side streaming |
+| **Multi-input merge** | SortPreservingMergeExec | `spawn_buffered()` per input, then loser tree merge |
+| **Channel-based** | RepartitionExec, CoalescePartitionsExec | Spawns tasks via `RecordBatchReceiverStreamBuilder` |
+
 ## 4. Concurrency & State Management
 * **Threading Model:** `execute()` is synchronous — it runs on the calling thread and returns immediately. No Tokio tasks are spawned during stream initialization for pass-through operators (Filter, Projection). The returned stream is `Send`, so it can be moved to any Tokio worker thread for polling.
-* **Recursive initialization is depth-first.** The call to `self.input.execute()` recursively initializes the entire subtree below this operator before the current operator's stream struct is created. If the plan tree is Filter → Projection → Scan, the initialization order is: Scan creates its stream first, then Projection wraps it, then Filter wraps that.
+* **Recursive initialization is depth-first.** The call to `self.input.execute()` recursively initializes the entire subtree below this operator before the current operator's stream struct is created. If the plan tree is Filter -> Projection -> Scan, the initialization order is: Scan creates its stream first, then Projection wraps it, then Filter wraps that.
 * **No computation during initialization.** The `execute()` method creates the stream struct but does NOT start processing data. All computation happens lazily during `poll_next()`. This is why `execute()` is synchronous, not async.
 * **Context sharing:** The same `Arc<TaskContext>` is passed to all operators in the tree. Each operator clones the `Arc` for its child. This means all partitions within a query share the same `MemoryPool`, `DiskManager`, and `SessionConfig`.
 

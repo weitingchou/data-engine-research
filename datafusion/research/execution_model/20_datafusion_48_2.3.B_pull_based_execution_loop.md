@@ -2,7 +2,7 @@
 
 ## 0. Research Focus
 * **Task ID:** 2.3.B
-* **Focus:** This is the core engine loop. Trace how `poll_next()` is called. Document exactly where the stream hits an `.await` point (yielding control back to the Tokio executor) when waiting for upstream data or disk I/O.
+* **Focus:** This is the core engine loop. Trace how `poll_next()` cascades down the stream chain. Note how the `ready!` macro bubbles up `Poll::Pending` asynchronously. Document where the stream hits `.await` points that yield control back to Tokio. Contrast with Trino's `Driver` loop manually checking `operator.needsInput()` and `operator.isBlocked()`. How does `BaselineMetrics::record_poll()` wrap every stream for observability?
 
 ## 1. High-Level Overview
 * **Core Responsibility:** The pull-based execution loop is driven by the Tokio runtime polling `poll_next()` on the top-level stream. Each `poll_next()` call cascades down the stream pipeline — a consumer polls its input, which polls its input, recursively until a leaf stream (e.g., a data source) either produces a batch or returns `Poll::Pending`. The key macro is `ready!()`, which yields control back to Tokio when the upstream is not ready, and resumes execution when data becomes available.
@@ -30,17 +30,17 @@ classDiagram
 
     class FilterExecStream {
         +poll_next(cx) Poll
-        -loop: check coalescer → poll input → filter → push → repeat
+        -loop: check coalescer then poll input then filter then push then repeat
     }
 
     class ProjectionStream {
         +poll_next(cx) Poll
-        -map: poll input → project columns → return
+        -map: poll input then project columns then return
     }
 
     class ObservedStream {
         +poll_next(cx) Poll
-        -wrap: poll inner → check limit → record metrics
+        -wrap: poll inner then check limit then record metrics
     }
 
     class BaselineMetrics {
@@ -63,7 +63,7 @@ classDiagram
 ```mermaid
 sequenceDiagram
     participant Tokio as Tokio Runtime
-    participant Consumer as collect()
+    participant Consumer as collect
     participant Proj as ProjectionStream
     participant Filter as FilterExecStream
     participant Scan as DataSource Stream
@@ -85,7 +85,7 @@ sequenceDiagram
         end
     else Scan waiting for I/O
         Scan-->>Filter: Poll::Pending
-        Filter-->>Proj: Poll::Pending (via ready! macro)
+        Filter-->>Proj: Poll::Pending via ready! macro
         Proj-->>Consumer: Poll::Pending
         Note over Tokio: Tokio parks the task,<br/>resumes when I/O completes
     end
@@ -166,7 +166,7 @@ match self.input.poll_next_unpin(cx) {
 }
 ```
 
-When upstream returns `Pending`, the entire `poll_next` returns `Pending`, and Tokio parks the task. The task will be woken when the upstream stream's waker is triggered (e.g., by I/O completion or a channel send).
+When upstream returns `Pending`, the entire `poll_next` returns `Pending`, and Tokio parks the task. The task will be woken by the `Waker` stored in the `Context` (`cx`) when the underlying I/O or channel operation completes.
 
 **Why the loop?** Filtering can produce empty batches (all rows filtered out) or small batches. The `LimitedBatchCoalescer` accumulates these until it has a target-sized batch. The loop keeps pulling from upstream until either a full batch is ready or upstream is exhausted.
 
@@ -247,10 +247,10 @@ pub fn record_poll(
 ```
 
 This intercepts every `poll_next` result:
-- **`Some(Ok(batch))`** → Increments `output_rows`, `output_bytes`, `output_batches` counters.
-- **`Some(Err(_))`** → Calls `done()` to record the end timestamp.
-- **`None`** → Calls `done()` to record the end timestamp.
-- **`Pending`** → Does nothing (not a `Ready` value).
+- **`Some(Ok(batch))`** — Increments `output_rows`, `output_bytes`, `output_batches` counters.
+- **`Some(Err(_))`** — Calls `done()` to record the end timestamp.
+- **`None`** — Calls `done()` to record the end timestamp.
+- **`Pending`** — Does nothing (not a `Ready` value).
 
 The `record_output` on `RecordBatch`:
 
@@ -290,6 +290,112 @@ When `Poll::Pending` is returned up the entire call stack, Tokio parks the curre
 | SortExec stream | `ready!(self.input.poll_next_unpin(cx))` inside `try_flatten` | Input not ready |
 | CoalescePartitions | `ready!(self.inner.poll_next_unpin(cx))` | Merged stream not ready |
 
+### CooperativeStream — Tokio Task Budget Integration
+
+`CooperativeStream` (in `coop.rs`) is a critical wrapper that prevents long-running streams from starving other Tokio tasks. It wraps any `RecordBatchStream` and consumes Tokio's cooperative scheduling budget for each batch produced.
+
+```rust
+// coop.rs:102-213
+pub struct CooperativeStream<T: RecordBatchStream + Unpin> {
+    inner: T,
+    budget: u8,  // Tracks remaining budget (per_stream mode)
+}
+
+const YIELD_FREQUENCY: u8 = 128;  // Matches Tokio's internal budget
+```
+
+**Three compile-time operating modes:**
+1. **`tokio` mode (default):** Uses `tokio::task::coop::poll_proceed(cx)` before polling the inner stream, and calls `coop.made_progress()` after producing a batch.
+2. **`tokio_fallback` mode:** Uses `has_budget_remaining()` + `consume_budget()` for older Tokio versions.
+3. **`per_stream` mode:** Manual counter — decrements per batch, resets to 128 when exhausted, yields via `Poll::Pending` + waker.
+
+**How it integrates:** The `EnsureCooperative` physical optimizer rule automatically inserts `CooperativeExec` wrappers around non-cooperative leaf and exchange nodes:
+
+```rust
+// ensure_coop.rs:88-116
+let is_cooperative = props.scheduling_type == SchedulingType::Cooperative;
+let is_leaf = plan.children().is_empty();
+let is_exchange = props.evaluation_type == EvaluationType::Eager;
+
+if (is_leaf || is_exchange) && !is_cooperative {
+    return Ok(Transformed::yes(Arc::new(CooperativeExec::new(plan))));
+}
+```
+
+Operators that declare `SchedulingType::Cooperative` (file scans, RepartitionExec, CoalescePartitionsExec, MemoryExec) consume budget themselves. Non-cooperative operators are automatically wrapped. This ensures every stream path in the plan cooperates with Tokio's scheduler, enabling timely query cancellation and fair scheduling.
+
+### SortPreservingMergeExec — Loser Tree K-Way Merge
+
+For merging N sorted streams, DataFusion uses a tournament loser tree (O(log N) comparisons per element):
+
+```rust
+// sorts/merge.rs
+pub struct SortPreservingMergeStream<C: CursorValues> {
+    loser_tree: Vec<usize>,      // Tournament tree: node 0 = winner, nodes 1..N = losers
+    cursors: Vec<Option<Cursor<C>>>,  // One cursor per input stream
+    in_progress: BatchBuilder,        // Accumulates output batch
+}
+```
+
+The tree structure: node 0 holds the current minimum (winner), nodes 1..N form a binary tree where each internal node stores the loser of the comparison at that level. To advance, only the path from the winner's leaf to the root needs updating — O(log N) comparisons.
+
+A **round-robin tie-breaker** prevents upstream buffer overflow when multiple streams have identical values: it tracks poll counts per stream and favors the least-polled stream, balancing consumption across inputs.
+
+### HashJoinStream — State Machine Poll Loop
+
+```rust
+// joins/hash_join/stream.rs:426-469
+fn poll_next_impl(&mut self, cx: &mut Context<'_>) -> Poll<Option<Result<RecordBatch>>> {
+    loop {
+        if let Some(batch) = self.output_buffer.next_completed_batch() {
+            return self.join_metrics.baseline.record_poll(Poll::Ready(Some(Ok(batch))));
+        }
+        return match self.state {
+            WaitBuildSide => handle_state!(ready!(self.collect_build_side(cx))),
+            FetchProbeBatch => handle_state!(ready!(self.fetch_probe_batch(cx))),
+            ProcessProbeBatch(_) => handle_state!(self.process_probe_batch()),
+            ExhaustedProbeSide => handle_state!(self.process_unmatched_build_side()),
+            Completed => Poll::Ready(None),
+        };
+    }
+}
+```
+
+States: `WaitBuildSide` (polls build-side `OnceFut`) -> `FetchProbeBatch` (polls probe stream) -> `ProcessProbeBatch` (synchronous probing) -> `ExhaustedProbeSide` (emit unmatched left rows for outer joins) -> `Completed`. The build side is collected into memory before any probe-side polling begins.
+
+### GroupedHashAggregateStream — OOM-Aware Aggregation
+
+The aggregate operator supports three OOM modes:
+
+```rust
+// aggregates/row_hash.rs:569-588
+let oom_mode = match (agg.mode, &group_ordering) {
+    (AggregateMode::Partial, _) => OutOfMemoryMode::EmitEarly,     // Emit partial results
+    (_, GroupOrdering::None | GroupOrdering::Partial(_))
+        if disk_manager.tmp_files_enabled() => OutOfMemoryMode::Spill,  // Spill to disk
+    (_, GroupOrdering::Full) => OutOfMemoryMode::ReportError,      // Can't spill ordered input
+};
+```
+
+Its poll loop includes a **skip aggregation probe**: it monitors the ratio of `num_groups / input_rows` and switches to pass-through mode if the ratio exceeds a threshold (aggregation is providing no benefit). It also supports **ordered group emission** — for inputs sorted by group keys, it emits complete groups incrementally without waiting for all input.
+
+### Contrast with Trino's Driver Loop
+
+Trino's `Driver` implements a manual state machine:
+```java
+// Trino: Driver.processInternal()
+while (!done) {
+    ListenableFuture<?> blocked = processFor(SPLIT_RUN_QUANTA); // 1 second
+    if (!blocked.isDone()) { return blocked; } // Yield to scheduler
+    updateDriverBlockedFuture(blocked);
+}
+```
+
+DataFusion replaces this with:
+1. **No explicit loop** — Tokio drives polling automatically.
+2. **No time quanta** — The `ready!()` macro yields at natural I/O boundaries, not after a fixed time.
+3. **No `needsInput()`/`isBlocked()` checks** — The `Poll::Pending`/`Poll::Ready` protocol encodes blocking state directly in the return type.
+
 ## 4. Concurrency & State Management
 * **Threading Model:** A single `poll_next()` call executes synchronously on the Tokio worker thread that picks up the task. There is no parallelism within a single poll — the cascade from consumer to leaf is a synchronous depth-first traversal. Parallelism comes from multiple partition streams being polled concurrently by different Tokio worker threads.
 * **No preemption within a poll.** Once `poll_next()` starts executing (after receiving a `Ready` from upstream), it runs to completion without interruption. The compute-intensive work (predicate evaluation, column projection, hashing) happens inline. If an operator takes too long in a single poll, it blocks the Tokio worker thread. This is why DataFusion processes data in batches — the batch size bounds the maximum work per poll.
@@ -310,3 +416,9 @@ When `Poll::Pending` is returned up the entire call stack, Tokio parks the curre
 * **The `record_poll` wrapper is applied at the boundary.** It wraps the final `Poll` value just before returning, ensuring that metrics capture exactly what the consumer sees — not internal intermediate states. This is why metrics are accurate even when the operator has an internal loop.
 
 * **Channel-based streams have a different yield pattern.** Operators like `RecordBatchReceiverStream` yield on `rx.poll_recv(cx)` (a Tokio channel receive). This is fundamentally different from the recursive-poll pattern — the channel decouples the producer and consumer into independent Tokio tasks, enabling pipeline parallelism. The producer fills the channel buffer while the consumer processes the previous batch.
+
+* **`CooperativeStream` is the Tokio fairness mechanism.** Without it, a CPU-intensive operator (e.g., a complex aggregation) could monopolize a Tokio worker thread for the duration of a batch. `CooperativeStream` consumes Tokio's task budget per batch, allowing the scheduler to interleave other tasks. The `EnsureCooperative` optimizer automatically inserts these wrappers, making cooperation transparent to operator implementations.
+
+* **Complex operators use state machines instead of simple loops.** HashJoinStream has 5 states, GroupedHashAggregateStream has 4. Each `poll_next()` checks the current state and either advances synchronously or yields via `ready!()`. This pattern enables operators with multiple phases (build + probe, accumulate + emit) to suspend and resume across async boundaries.
+
+* **SortPreservingMerge uses a loser tree for O(log N) merges.** Rather than a naive O(N) min-scan across N inputs, the loser tree tournament maintains a binary tree where only the path from the consumed element's leaf to the root needs updating. The round-robin tie-breaker prevents pathological cases where one input is polled far more than others.

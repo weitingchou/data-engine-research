@@ -1,8 +1,8 @@
 # Module Teardown: Tokio Task Spawning
 
 ## 0. Research Focus
-* **Task ID:** 2.2.A
-* **Focus:** How are multiple partitions mapped to actual CPU threads? Find the exact mechanisms where DataFusion uses `tokio::spawn` or `tokio::task::spawn_blocking` to hand off work to the async runtime.
+* **Task ID:** 2.4.A
+* **Focus:** How are multiple partitions mapped to actual CPU threads? Trace `SpawnedTask` (abort-on-drop wrapper around `tokio::task::JoinHandle`), `JoinSet` (managed task set), `spawn_buffered()` (channel-based stream decoupling), and `collect_partitioned()` (one Tokio task per partition). Why is raw `tokio::spawn` banned in operator code?
 
 ## 1. High-Level Overview
 * **Core Responsibility:** DataFusion maps partitions to OS threads indirectly through Tokio's async runtime. Rather than spawning one thread per partition, operators create async streams that are driven by the Tokio executor. Explicit task spawning is done through two controlled primitives: `SpawnedTask` (single task with abort-on-drop) and `JoinSet` (managed set of tasks). The key spawning function is `spawn_buffered()`, which decouples a producer stream from its consumer via a bounded channel and a background Tokio task.
@@ -29,7 +29,7 @@ classDiagram
         +spawn(future) SpawnedTask
         +spawn_blocking(fn) SpawnedTask
         +join(self) Result~R~
-        +Drop::drop() → inner.abort()
+        +Drop::drop() inner.abort()
     }
 
     class JoinSet~T~ {
@@ -38,7 +38,7 @@ classDiagram
         +spawn_blocking(fn)
         +join_next() Option~Result~T~~
         +abort_all()
-        +Drop → abort all tasks
+        +Drop abort all tasks
     }
 
     class RecordBatchReceiverStreamBuilder {
@@ -59,25 +59,25 @@ classDiagram
 ### Sequence Diagram: `collect_partitioned` — Parallel Partition Execution
 ```mermaid
 sequenceDiagram
-    participant User as collect_partitioned()
+    participant User as collect_partitioned
     participant JS as JoinSet
     participant Plan as ExecutionPlan
     participant T0 as Tokio Task 0
     participant T1 as Tokio Task 1
 
-    User->>Plan: execute(0, context) → Stream(0)
-    User->>Plan: execute(1, context) → Stream(1)
+    User->>Plan: execute(0, context) -> stream 0
+    User->>Plan: execute(1, context) -> stream 1
     User->>JS: join_set.spawn(stream0.try_collect())
     User->>JS: join_set.spawn(stream1.try_collect())
     Note over JS: Both tasks run concurrently<br/>on Tokio thread pool
 
     par Tokio schedules concurrently
-        T0->>T0: poll Stream(0) → batches
-        T1->>T1: poll Stream(1) → batches
+        T0->>T0: poll stream 0 -> batches
+        T1->>T1: poll stream 1 -> batches
     end
 
-    JS-->>User: (0, Vec<RecordBatch>)
-    JS-->>User: (1, Vec<RecordBatch>)
+    JS-->>User: (0, Vec~RecordBatch~)
+    JS-->>User: (1, Vec~RecordBatch~)
     User->>User: Sort by partition index, return
 ```
 
@@ -156,14 +156,14 @@ impl<R> SpawnedTask<R> {
     pub fn spawn<T>(task: T) -> Self
     where T: Future<Output = R> + Send + 'static, R: Send,
     {
-        let inner = tokio::task::spawn(trace_future(task));
+        let inner = tokio::task::spawn(trace_future(task));  // ← wrapped with tracer
         Self { inner }
     }
 
     pub fn spawn_blocking<T>(task: T) -> Self
     where T: FnOnce() -> R + Send + 'static, R: Send,
     {
-        let inner = tokio::task::spawn_blocking(trace_block(task));
+        let inner = tokio::task::spawn_blocking(trace_block(task));  // ← wrapped with tracer
         Self { inner }
     }
 }
@@ -174,6 +174,42 @@ impl<R> Drop for SpawnedTask<R> {
     }
 }
 ```
+
+### `trace_future` / `trace_block` — Global Tracer Injection
+
+All spawned tasks are wrapped with `trace_future()` or `trace_block()` before being handed to Tokio. These wrappers delegate to a global `JoinSetTracer` trait object:
+
+```rust
+// trace_utils.rs
+pub trait JoinSetTracer: Send + Sync + 'static {
+    fn trace_future(&self, fut: BoxFuture<'static, Box<dyn Any + Send>>)
+        -> BoxFuture<'static, Box<dyn Any + Send>>;
+    fn trace_block(&self, f: Box<dyn FnOnce() -> Box<dyn Any + Send> + Send>)
+        -> Box<dyn FnOnce() -> Box<dyn Any + Send> + Send>;
+}
+
+static GLOBAL_TRACER: OnceCell<&'static dyn JoinSetTracer> = OnceCell::const_new();
+```
+
+By default, a no-op tracer is used (zero-cost). Embedders can install a custom tracer at startup via `set_join_set_tracer()` for distributed tracing integration (e.g., OpenTelemetry, Jaeger). The type-erasing mechanism uses `Box<dyn Any + Send>` with a downcast on return, allowing the tracer to be completely generic.
+
+### `EnsureCooperative` — Automatic Cooperative Scheduling
+
+The `EnsureCooperative` physical optimizer rule injects `CooperativeExec` wrappers around non-cooperative operators:
+
+```rust
+// ensure_coop.rs:88-116
+let is_cooperative = props.scheduling_type == SchedulingType::Cooperative;
+let is_leaf = plan.children().is_empty();
+let is_exchange = props.evaluation_type == EvaluationType::Eager;
+
+// Wrap non-cooperative leaf/exchange nodes with CooperativeExec
+if (is_leaf || is_exchange) && !is_cooperative && !is_under_cooperative_context {
+    return Ok(Transformed::yes(Arc::new(CooperativeExec::new(plan))));
+}
+```
+
+`CooperativeExec` wraps the inner plan's streams with `CooperativeStream`, which consumes Tokio's task budget for each batch produced. This ensures that even CPU-intensive operators yield to the scheduler periodically, enabling query cancellation and fair scheduling across concurrent queries.
 
 ## 4. Concurrency & State Management
 * **Threading Model:** DataFusion does NOT create OS threads or Tokio tasks per partition by default. Partitions are async streams, and the Tokio runtime multiplexes them across its thread pool. Explicit spawning only happens in specific cases:
@@ -196,3 +232,11 @@ impl<R> Drop for SpawnedTask<R> {
 * **`spawn_buffered` enables pipeline parallelism.** Without it, pulling from a sort operator would block the downstream consumer until the sort completes. With `spawn_buffered`, the sort runs in a background task and buffers results in a channel, allowing the consumer to start processing immediately when results are available.
 
 * **`RecordBatchReceiverStreamBuilder` is the primary spawning pattern.** Most operators that need background tasks use this builder: create a channel, spawn producers that send batches, and build a consumer stream. The builder's `JoinSet` ensures all spawned tasks are cancelled when the stream is dropped.
+
+* **`spawn_buffered` buffer size is almost always 1.** Across the codebase, `spawn_buffered(stream, 1)` is the dominant pattern (used by SortExec, SortPreservingMergeExec, SpillManager). A buffer of 1 creates a "producer-consumer" decoupling — the producer can work on the next batch while the consumer processes the current one — without unbounded memory growth. This is intentional: larger buffers would consume more memory without proportionally increasing throughput.
+
+* **All task spawning is traced.** `SpawnedTask::spawn()` wraps futures with `trace_future()`, which delegates to a global `JoinSetTracer`. This enables embedders to inject distributed tracing (OpenTelemetry, Jaeger) into every spawned task without modifying operator code. The default no-op tracer adds zero overhead.
+
+* **`EnsureCooperative` optimizer makes cooperation automatic.** Operators don't need to explicitly manage Tokio's task budget. The physical optimizer identifies non-cooperative leaf and exchange nodes and wraps them with `CooperativeExec`, which injects a `CooperativeStream` that consumes budget per batch. This means cooperative scheduling is a property of the plan, not of individual operator implementations.
+
+* **No thread affinity or `spawn_local`.** DataFusion uses no `spawn_local()`, `LocalSet`, CPU binding, or thread affinity hints anywhere in its operator code. All tasks are `Send` and can migrate freely between Tokio worker threads. The work-stealing scheduler distributes work automatically.
