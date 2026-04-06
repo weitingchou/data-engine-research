@@ -99,6 +99,15 @@ Tracing the simplest data flow where one input page directly results in one or m
 * **Task 3.3.A: Simple Projection & Filtering**
     * **Target Files:** `io.trino.operator.ScanFilterAndProjectOperator`, `io.trino.operator.project.PageProcessor`
     * **Focus:** Trace a raw block of data coming from a connector, passing through a filter, and yielding a transformed `Page`. How does Trino compile these expressions into bytecode for faster execution?
+* **Task 3.3.B: Expression Serialization Format** `[KG-7]`
+    * **Target Files:** `io.trino.sql.planner.plan.Assignments` (projection expressions), `io.trino.sql.ir.Expression` and all subclasses (`io.trino.sql.ir.Call`, `io.trino.sql.ir.Comparison`, `io.trino.sql.ir.Reference`, `io.trino.sql.ir.Constant`, etc.), Jackson serialization annotations on `Expression`
+    * **Focus:** The coordinator compiles SQL into optimized bytecode for the Java worker (`ExpressionCompiler` → `PageProcessor`). But what is actually *sent over the wire* to the worker?
+      1. Is the wire format an expression AST (tree of `Expression` nodes), pre-compiled JVM bytecode, or something else entirely?
+      2. If AST: trace the `Expression` class hierarchy. Document every `Expression` subclass and its JSON fields (e.g., `Call` has `functionName` + `arguments`, `Comparison` has `operator` + `left` + `right`, `Reference` has `name` referring to a column, etc.).
+      3. How are function references serialized? (By name? By a `FunctionId`? With type signature?)
+      4. How are literal constants serialized? (Inline value? Type-tagged? How are complex types like `ARRAY` or `ROW` literals represented?)
+      5. How does the worker reconstruct executable expressions from this wire format? Trace from JSON deserialization to `PageProcessor` compilation.
+      6. Capture concrete JSON for: a comparison (`col1 > 10`), an arithmetic expression (`col1 + col2 * 3`), a function call (`UPPER(name)`), and a CAST expression.
 
 ### Task 3.4: Stateful & Complex Pipelines
 Tracing operations that must hold state across multiple `addInput()` calls, and operations that bridge multiple Pipelines.
@@ -137,6 +146,53 @@ How the "Brain" manages the "Muscle." This is primarily REST/JSON based.
 * **Task 4.1.C: Dynamic Filter Coordination**
     * **Target Files:** `io.trino.server.DynamicFilterService`
     * **Focus:** Trace how a worker "collects" a filter (from a join build side) and sends it back to the coordinator, and how the coordinator then "broadcasts" it to other workers to prune scans.
+* **Task 4.1.D: Worker Discovery & Registration Protocol** `[KG-3]`
+    * **Target Files:** `io.trino.server.ServerMainModule` (startup wiring), `io.airlift.discovery.client.DiscoveryModule`, `io.airlift.discovery.client.ServiceAnnouncement`, `io.trino.server.InternalCommunicationModule`
+    * **Focus:** Trace the worker startup sequence:
+      1. How does a worker register itself with the coordinator? Is it via Airlift's `DiscoveryClient` posting to a discovery service?
+      2. What `ServiceAnnouncement` properties does the worker advertise? (node ID, HTTP URI, connector IDs, etc.)
+      3. Is there a periodic heartbeat from the worker to the coordinator (separate from task-level status)? What happens if the coordinator doesn't see a worker heartbeat?
+      4. How does the coordinator maintain its list of active workers? Trace the `NodeManager` / `InternalNodeManager` to see how the worker fleet is tracked.
+      5. What configuration properties must the worker set to join a cluster? (`coordinator-url`? `discovery.uri`? `node.id`?)
+* **Task 4.1.E: TaskUpdateRequest Full JSON Schema** `[KG-4]`
+    * **Target Files:** `io.trino.server.TaskUpdateRequest`, `io.trino.execution.TaskInfo`, Jackson annotations, any JSON schema tests
+    * **Focus:** Document every field in the `TaskUpdateRequest` JSON payload:
+      1. Top-level fields: `session`, `extraCredentials`, `fragment` (the plan), `sources` (split assignments), `outputIds`, `dynamicFilterDomains`, etc.
+      2. The `session` object: what fields does it carry? (`queryId`, `transactionId`, `user`, `source`, `catalog`, `schema`, `timeZone`, `language`, `systemProperties`, `catalogProperties`, etc.)
+      3. The `sources` field: how are `SplitAssignment` objects structured? How do they map splits to plan node IDs?
+      4. Which fields are optional vs. required? Which are sent only on the first update vs. every update?
+      5. Capture a complete concrete JSON example from a real `TaskUpdateRequest`.
+* **Task 4.1.F: Plan Fragment JSON Structure & Node Tagging** `[KG-6]`
+    * **Target Files:** `io.trino.sql.planner.PlanFragment`, `io.trino.sql.planner.plan.PlanNode` (and all subclasses), `io.trino.server.TaskResource` (JSON serialization path), Jackson `@JsonTypeInfo` / `@JsonSubTypes` annotations on PlanNode
+    * **Focus:** Trace the exact JSON structure of a serialized `PlanFragment`. Specifically:
+      1. How are plan nodes tagged for polymorphic deserialization? (Is there an `@type` field? A `type` discriminator? What are the exact string values for each node type?)
+      2. What is the top-level structure of `PlanFragment` JSON? (Fields: `id`, `root` plan node, `partitioning`, `partitionedSources`, `outputLayout`, etc.)
+      3. Trace the recursive structure: how does a `JoinNode` reference its left/right children? How does a `TableScanNode` reference its table handle?
+      4. Capture concrete JSON examples by tracing serialization of at least three plan types: (a) a simple `TableScan -> Filter -> Project -> Output`, (b) a `HashJoin` with build and probe sides, (c) an `Aggregation` with GROUP BY.
+      5. Document the `PartitioningScheme` and `PartitioningHandle` JSON — these determine how output is distributed.
+* **Task 4.1.G: Type System JSON Serialization** `[KG-8]`
+    * **Target Files:** `io.trino.spi.type.Type` (and all implementations), `io.trino.spi.type.TypeSignature`, `io.trino.type.TypeDeserializer`, Jackson annotations on type classes
+    * **Focus:** How are Trino SQL types serialized in plan fragment JSON?
+      1. Document the JSON representation of each base type: `BOOLEAN`, `TINYINT`, `SMALLINT`, `INTEGER`, `BIGINT`, `REAL`, `DOUBLE`, `VARCHAR`, `VARCHAR(n)`, `CHAR(n)`, `VARBINARY`, `DATE`, `TIME`, `TIMESTAMP`, `TIMESTAMP WITH TIME ZONE`, `INTERVAL`, `DECIMAL(p,s)`, `UUID`, `JSON`.
+      2. Document parameterized types: `ARRAY(element)`, `MAP(key, value)`, `ROW(name1 type1, name2 type2, ...)`.
+      3. Is the serialization based on `TypeSignature` (string-based like `"varchar(256)"`) or a structured JSON object?
+      4. How are type parameters encoded for `DECIMAL(p,s)` — inline in the signature string or as separate fields?
+* **Task 4.1.H: TaskStatus & TaskInfo Full JSON Schema** `[KG-5]`
+    * **Target Files:** `io.trino.execution.TaskStatus`, `io.trino.execution.TaskInfo`, `io.trino.operator.TaskStats`, `io.trino.operator.PipelineStats`, `io.trino.operator.OperatorStats`, Jackson annotations
+    * **Focus:** Document the complete response schemas:
+      1. `TaskStatus`: all fields (`taskId`, `taskInstanceId`, `version`, `state`, `self` URI, `failures`, `queuedPartitionedDrivers`, `runningPartitionedDrivers`, `outputBufferStatus`, `dynamicFiltersVersion`, memory usage fields, etc.)
+      2. `TaskInfo`: all fields (superset of `TaskStatus` plus `taskStats`, `needsPlan`, etc.)
+      3. `TaskStats`: all aggregate metrics fields
+      4. `PipelineStats`: per-pipeline metrics
+      5. `OperatorStats`: per-operator metrics (this is what the coordinator uses for query progress UI)
+      6. The `OutputBufferInfo` nested object: buffer state, partition statuses, memory usage
+* **Task 4.1.I: Pipeline & Operator Stats JSON Fields** `[KG-9]`
+    * **Target Files:** `io.trino.operator.OperatorStats`, `io.trino.operator.DriverStats`, `io.trino.operator.PipelineStats`, `io.trino.operator.TaskStats`
+    * **Focus:** Enumerate every metric field reported by the worker:
+      1. For `OperatorStats`: `operatorId`, `planNodeId`, `operatorType`, `totalDrivers`, `addInputCalls`, `addInputWall`, `addInputCpu`, `inputDataSize`, `inputPositions`, `getOutputCalls`, `getOutputWall`, `getOutputCpu`, `outputDataSize`, `outputPositions`, `physicalWrittenDataSize`, `blockedWall`, `finishCalls`, `finishWall`, `finishCpu`, `userMemoryReservation`, `revocableMemoryReservation`, `peakUserMemoryReservation`, `peakRevocableMemoryReservation`, `spilledDataSize`, `connectorMetrics`, `connectorOperatorTimer`, `dynamicFilterSplitsProcessed`, etc.
+      2. Which of these fields does the coordinator *require* (vs. best-effort)? Are there fields that, if missing or zero, cause the coordinator to make incorrect scheduling decisions?
+      3. How are timing values represented? (ISO duration strings? Milliseconds as longs?)
+      4. How are data sizes represented? (`DataSize` objects with value+unit? Raw bytes as longs?)
 
 ### Task 4.2: The Data Plane (Worker ↔ Worker Shuffle)
 How data moves between workers during a query. This is high-volume HTTP streaming.
@@ -150,6 +206,41 @@ How data moves between workers during a query. This is high-volume HTTP streamin
 * **Task 4.2.C: The Coordinator as the Final Consumer**
     * **Target Files:** `io.trino.server.StatementResource`, `io.trino.execution.DataPuller` (or how `Query` manages the final exchange)
     * **Focus:** Trace how the coordinator fetches the final result set from the root task. How does the root worker's `OutputBuffer` differ (if at all) from an intermediate shuffle buffer? How are internal `Pages` finally converted into the client-facing format?
+* **Task 4.2.D: Block-Level Binary Encoding** `[KG-1]`
+    * **Target Files:** `io.trino.spi.block.BlockEncodingSerde`, `io.trino.spi.block.BlockEncoding` (and all implementations: `LongArrayBlockEncoding`, `VariableWidthBlockEncoding`, `IntArrayBlockEncoding`, `ByteArrayBlockEncoding`, `Int128ArrayBlockEncoding`, `DictionaryBlockEncoding`, `RunLengthBlockEncoding`, `RowBlockEncoding`, `ArrayBlockEncoding`, `MapBlockEncoding`, etc.)
+    * **Focus:** Trace the exact binary layout written by each `BlockEncoding.writeBlock()` method:
+      1. For `LongArrayBlockEncoding`: how are the `positionCount`, null bitmap, and `long[]` values encoded? Byte order? Is the null bitmap packed (1 bit per position) or expanded (`boolean[]` → byte-per-position)?
+      2. For `VariableWidthBlockEncoding`: how are the offsets array, the byte data slice, and the null bitmap laid out?
+      3. For `DictionaryBlockEncoding`: how is the dictionary block encoded (recursive?), followed by the `int[]` ids?
+      4. For `RunLengthBlockEncoding`: how is the single value block + position count encoded?
+      5. For complex types (`RowBlockEncoding`, `ArrayBlockEncoding`, `MapBlockEncoding`): how is nesting handled?
+      6. Document the exact byte sequence for at least two concrete examples: (a) a `LongArrayBlock` with 1024 positions and 3 nulls, (b) a `VariableWidthBlock` with mixed-length strings.
+* **Task 4.2.E: Block Type Tags & Page Envelope** `[KG-2]`
+    * **Target Files:** `io.trino.execution.buffer.PagesSerdeUtil`, `io.trino.spi.block.BlockEncodingSerde` (the `readBlock`/`writeBlock` envelope), `io.trino.execution.buffer.PageSerializer`, `io.trino.execution.buffer.PageDeserializer`
+    * **Focus:** Trace the complete page serialization pipeline:
+      1. How does `PageSerializer` wrap the 12-byte page header (`positionCount`, `uncompressedSize`, `compressedSize`) around the block data?
+      2. Before each block, how is the block *type* identified? Is there a string tag (e.g., `"LONG_ARRAY"`)? A numeric enum? How is it length-prefixed?
+      3. When compression is applied (LZ4/ZSTD), is it applied to the entire page payload or per-block? What metadata identifies the compression codec?
+      4. When encryption is applied, what is the IV/nonce layout?
+      5. Trace `PagesSerdeUtil.readPages()` / `writePages()` to understand how multiple pages are framed in a single HTTP response body (for the exchange protocol).
+      6. Document the complete byte layout of a serialized HTTP response containing 2 pages with 3 columns each.
+* **Task 4.2.F: Partition Hash Function for Shuffle** `[KG-11]`
+    * **Target Files:** `io.trino.operator.PartitionFunction`, `io.trino.operator.InterpretedHashGenerator`, `io.trino.spi.type.TypeOperators` (hashCodeOperator), `io.trino.type.BlockTypeOperators`
+    * **Focus:** Trace the exact hash function used to assign rows to output partitions:
+      1. Which hash algorithm is used? (Murmur3? XxHash? Java's `hashCode()`?)
+      2. How is the hash computed for each type? (e.g., BIGINT → direct long hash? VARCHAR → hash of bytes? DECIMAL → ?)
+      3. How is the hash mapped to a partition number? (`hash % partitionCount`? Consistent hashing?)
+      4. Is the hash function stable across Trino versions? (It must be, for mixed-version clusters.)
+      5. Provide the exact hash computation for BIGINT, VARCHAR, DOUBLE, BOOLEAN, and TIMESTAMP so the Rust implementation can produce identical partition assignments.
+* **Task 4.2.G: Exchange Protocol HTTP Headers & Framing** `[KG-12]`
+    * **Target Files:** `io.trino.server.TaskResource.getResults()`, `io.trino.operator.HttpPageBufferClient`, `io.trino.execution.buffer.OutputBufferInfo`, HTTP header constants in Trino's codebase
+    * **Focus:** Document every HTTP header used in the exchange protocol:
+      1. Request headers: `X-Trino-Max-Size`, `X-Trino-Buffer-Remaining-Bytes`, `X-Trino-Task-Instance-Id`, any authentication headers.
+      2. Response headers: `X-Trino-Task-Instance-Id`, `X-Trino-Page-Token`, `X-Trino-Page-Next-Token`, `X-Trino-Buffer-Complete`, `Content-Type`, any custom headers.
+      3. The acknowledge/destroy endpoint: `DELETE /v1/task/{taskId}/results/{bufferId}/{token}` — what does the token mean here?
+      4. How is the HTTP response body framed when it contains multiple serialized pages? (Concatenated? Length-prefixed?)
+      5. What happens on error? (HTTP status codes, error response format)
+      6. Trace the exact request/response sequence for a complete page fetch cycle: initial request → page data → acknowledge → next request.
 
 ### Task 4.3: The Storage Plane (Worker ↔ Connector)
 How the worker interacts with the SPI (Service Provider Interface) to get raw data.
@@ -160,6 +251,13 @@ How the worker interacts with the SPI (Service Provider Interface) to get raw da
 * **Task 4.3.B: The Page Sink (Writing)**
     * **Target Files:** `io.trino.spi.connector.ConnectorPageSink`
     * **Focus:** Trace how data is sent to a connector for `INSERT` or `CREATE TABLE AS` operations. How does the worker handle transaction commits/rollbacks via the connector?
+* **Task 4.3.C: Split JSON Formats (Hive & Iceberg)** `[KG-10]`
+    * **Target Files:** `io.trino.plugin.hive.HiveSplit`, `io.trino.plugin.iceberg.IcebergSplit`, `io.trino.spi.connector.ConnectorSplit`, Jackson annotations, `io.trino.split.SplitJSON` or equivalent serialization wrappers
+    * **Focus:** Document the exact JSON structure of split objects as delivered in `TaskUpdateRequest.sources`:
+      1. `HiveSplit`: file path, start offset, length, file size, file modified time, partition keys (schema?), bucket number, table/partition format info, S3 region, etc.
+      2. `IcebergSplit`: file path, start offset, length, file format (PARQUET/ORC), partition spec, residual filter expression, etc.
+      3. How is the `ConnectorSplit` polymorphism handled in JSON? (Connector-specific `@type` tag? A wrapper with `connectorId` + opaque JSON blob?)
+      4. How are split assignments bundled? (`SplitAssignment` → list of `ScheduledSplit` → `Split` → `ConnectorSplit`)
 
 ---
 
@@ -185,3 +283,4 @@ How the worker interacts with the SPI (Service Provider Interface) to get raw da
 * **Task 5.4.A: Cluster Arbitration and the OOM Killer**
     * **Target Files:** `io.trino.memory.ClusterMemoryManager`, `io.trino.memory.LowMemoryKiller`
     * **Focus:** This requires jumping to the Coordinator. How does the coordinator aggregate the `MemoryInfo` from all workers? Trace the logic in `ClusterMemoryManager` when a worker reports a "blocked" state. How does the `LowMemoryKiller` select a victim, and how is the "kill" signal propagated back down the Control Plane (Phase 4) to the workers?
+
