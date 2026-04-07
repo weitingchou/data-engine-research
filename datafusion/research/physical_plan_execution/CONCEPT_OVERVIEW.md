@@ -78,6 +78,43 @@ Trino's spilling mechanism is *push-based*: a global `MemoryRevokingScheduler` f
 
 * **Key Config Options:** `sort_spill_reservation_bytes` (10MB pre-reserved merge headroom), `sort_in_place_threshold_bytes` (1MB), `max_spill_file_size_bytes` (128MB for SpillPoolWriter rotation), `max_temp_directory_size` (100GB global disk limit).
 
+## 5. SIMD & Auto-Vectorization Strategy
+
+DataFusion achieves SIMD performance through **pure LLVM auto-vectorization** — zero explicit SIMD intrinsics exist anywhere in DataFusion or arrow-rs (v58.1.0). This is not an omission but a deliberate design strategy.
+
+### The Auto-Vectorization Contract
+
+The entire stack is engineered so LLVM's auto-vectorizer can emit SIMD instructions:
+
+* **Arrow's 64-byte memory alignment** guarantees all `Buffer` allocations are cache-line-aligned, exceeding AVX-512 (64B), AVX2 (32B), and NEON (16B) requirements. LLVM can emit aligned loads (`vmovdqa`) without special alignment logic.
+* **Compile-time configuration:** `RUSTFLAGS='-C target-cpu=native'` enables the full instruction set of the build machine. Without it, only SSE2 (128-bit) is used on x86_64. With it on AVX2 hardware, 256-bit registers process 8× i32 per instruction; on AVX-512, 512-bit registers process 16× i32.
+* **LTO is critical:** The release profile uses `lto = true`, `codegen-units = 1`. Without LTO, Arrow kernel inner loops cannot be inlined across the crate boundary into DataFusion's expression evaluation — preventing loop fusion, constant propagation, and cross-kernel optimization.
+
+### Why Auto-Vectorization Works
+
+Arrow compute kernels are ideal auto-vectorization targets because:
+1. Inner loops iterate over contiguous `&[T]` slices — no scatter/gather patterns.
+2. Loop bodies are simple arithmetic or comparison operations.
+3. Null handling uses bitmask operations (`u64` AND/OR), not per-element branching.
+4. The `Datum` trait dispatches scalar-vs-array at the call site, not inside the loop.
+
+### DataFusion's Own Vectorized Loops
+
+Where DataFusion writes its own inner loops (aggregation, group-by), it uses explicit auto-vectorization-friendly patterns:
+
+* **`unsafe { get_unchecked_mut }` in `PrimitiveGroupsAccumulator`:** Eliminates bounds checks in the accumulation inner loop, allowing LLVM to vectorize the `value_fn(group_index, new_value)` closure.
+* **64-bit chunk null processing:** `NullState::accumulate()` processes null bitmaps in `u64` chunks via `bit_chunks()`, checking 64 validity bits per word with `mask & index_mask`.
+* **No-null fast paths everywhere:** `null_count() == 0` checks gate dedicated zero-overhead paths that skip bitmap processing entirely. The `const NULLABLE: bool` generic parameter enables compile-time elimination of null handling code.
+* **`BooleanBuffer::collect_bool`:** The workhorse for boolean construction — used in comparisons, IN-list, join hash maps. LLVM can vectorize the inner closure to compare 32 elements at once (AVX-512) and pack results into bits.
+
+### No Explicit SIMD — By Design
+
+A thorough search confirms zero uses of `std::arch`, `std::simd`, `packed_simd`, `#[target_feature]`, or any platform-specific intrinsic. Arrow-rs historically experimented with `packed_simd2` (the `simd` feature) but removed it in favor of auto-vectorization. The rationale: auto-vectorization is portable across architectures (x86, ARM, RISC-V) and benefits automatically from LLVM improvements, while explicit SIMD creates a maintenance burden and architecture-specific code paths.
+
+### Implications for the Rust Worker
+
+DataFusion's strategy is directly adoptable: use Arrow arrays as the internal data model, compile with `-C target-cpu=native` and LTO, and let LLVM handle vectorization for straightforward compute. For the critical paths where auto-vectorization is unreliable (hash table probing, null-aware compress/expand, Parquet bit-unpacking), supplement with explicit SIMD from `std::arch` — following Velox's approach for those specific hot paths.
+
 ## Summary: Connecting the Dots
 
 1. The **`RecordBatchStream`** trait (extending `futures::Stream`) is the universal operator contract. `poll_next()` replaces Trino's 5-method `Operator` interface.
@@ -85,3 +122,4 @@ Trino's spilling mechanism is *push-based*: a global `MemoryRevokingScheduler` f
 3. **Simple pipelines** (`ProjectionStream(FilterStream(ScanStream))`) compose as nested structs with zero abstraction overhead. Projection is zero-copy (`Arc::clone`). Filter coalesces small batches inline.
 4. **Complex pipelines** break the stream at stateful operators. Hash joins use cooperative `OnceFut` (no `tokio::spawn`), LIFO-chained `JoinHashMap` with `hashbrown::HashTable`, and a 5-state machine. Aggregation separates group interning from accumulation with a skip-aggregation probe for high cardinality.
 5. **Disk spilling** is pull-based and proactive: operators detect memory pressure via `try_grow()` failure and voluntarily spill via `SpillManager` using Arrow IPC format. A shared infrastructure (`SpillManager` + `InProgressSpillFile` + `DiskManager`) serves Sort, Aggregate, Repartition, and SortMergeJoin.
+6. **SIMD is achieved through pure auto-vectorization** — no explicit intrinsics. Arrow's 64-byte alignment, LTO, and `-C target-cpu=native` combine to let LLVM emit AVX2/AVX-512 instructions for compute kernels. DataFusion's own aggregation loops use `unsafe` unchecked access and 64-bit chunk null processing to stay on the auto-vectorization fast path.

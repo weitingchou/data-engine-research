@@ -141,9 +141,24 @@ Arrow `RecordBatch` is the internal unit of computation. No custom columnar type
 
 **SIMD alignment:** Arrow's 64-byte memory alignment (cache-line aligned) is the foundation for SIMD acceleration. All `Buffer` allocations go through aligned allocators, enabling LLVM auto-vectorization of tight compute loops without explicit intrinsics. This alignment must be preserved throughout the pipeline — no unaligned copies between the wire format boundary and the compute layer.
 
-> **KNOWLEDGE GAP [KG-14]: SIMD Vectorization Across Engines**
-> To maximize SIMD hardware efficiency (GOAL.md Section 3 — "Compute & SIMD Acceleration"), we need to understand how each engine achieves vectorized compute: Trino's JVM auto-vectorization and SWAR tricks, DataFusion/Arrow's LLVM auto-vectorization with 64-byte alignment, and Velox's explicit SIMD intrinsics via `xsimd`. This determines whether the Rust worker should rely on auto-vectorization, use explicit SIMD (via `std::simd` or `packed_simd`), or adopt a hybrid approach.
-> **Required research tasks:** → `TRINO_TRACING_GUIDE.md` Task 3.6.A, `DATAFUSION_TRACING_GUIDE.md` Task 3.6.A, `VELOX_TRACING_GUIDE.md` Task 3.6.A
+**SIMD strategy (resolved from KG-14):** The three engines use fundamentally different approaches:
+
+* **Trino:** Three-tier hybrid — (1) explicit Java Vector API for exchange serde compress/expand (AVX-512 `VPCOMPRESS`/`VPEXPAND`) and Parquet bit-unpacking, (2) SWAR 8-way byte matching in `FlatHash` for hash probing, (3) JVM auto-vectorization for compute (branchless selection loops, flat `boolean[]` null representation).
+* **DataFusion:** Pure auto-vectorization — zero explicit SIMD in either DataFusion or arrow-rs (v58.1.0). Relies on Arrow's 64-byte alignment + LTO (`lto = true`, `codegen-units = 1`) + `-C target-cpu=native` for LLVM to emit AVX2/AVX-512 instructions. Aggregation loops use `unsafe { get_unchecked_mut }` and 64-bit chunk null processing.
+* **Velox:** Aggressive explicit SIMD — xsimd 10.0.0 abstraction layer (~1,950 lines) + raw intrinsics. Swiss-table tag probing with 4-way interleaved prefetch, SIMD filter evaluation (`testValues(xsimd::batch<T>)`), SIMD bloom filter, SIMD substring search, CRC32 hardware acceleration. Compile-time dispatch only (no runtime CPUID). **Intentionally avoids AVX-512** due to frequency throttling.
+
+**Our approach — hybrid auto-vectorization + targeted explicit SIMD:**
+
+| Subsystem | Strategy | Rationale |
+|-----------|----------|-----------|
+| Arithmetic, comparison, projection | LLVM auto-vectorization (Arrow kernels) | DataFusion pattern — works well for simple loops over contiguous slices |
+| Hash table probing | `hashbrown` native SIMD (SSE2/NEON) | Already Swiss-table with 16-way tag matching; consider 4-way interleaved probing from Velox |
+| Wire format compress/expand | `std::arch` AVX-512 intrinsics or Arrow `filter` kernel | Trino pattern — hardware compress/expand is critical for null-heavy serde |
+| Null bit packing (MSB↔LSB) | Arrow bitmap utilities + explicit SIMD for bulk conversion | Bit-reversal at boundary is a fixed cost; SIMD packing amortizes it |
+| Parquet bit-unpacking | Arrow Parquet reader (auto-vectorized) or `bitpacking` crate | Arrow reader already handles this; explicit SIMD only if profiling shows need |
+| Partition hash computation | `xxhash-rust` (scalar compatibility) + batch SIMD hashing for bulk ops | Must be bit-compatible with Trino's xxHash64 mix |
+
+Build configuration: always compile with `lto = true`, `codegen-units = 1`, `-C target-cpu=native` for release. Use `#[cfg(target_feature = "avx2")]` for compile-time dispatch of explicit SIMD paths, with scalar fallbacks for portability.
 
 #### 1B. Trino Wire Format (`trw-protocol`)
 
@@ -731,7 +746,7 @@ All 13 knowledge gaps have been **resolved** via research tasks in the TRINO_TRA
 | KG-11 | Partition hash function for shuffle | Phase 6 | **RESOLVED** | Task 4.2.F |
 | KG-12 | Exchange protocol HTTP headers | Phase 6 | **RESOLVED** | Task 4.2.G |
 | KG-13 | Trino & DataFusion test structure | Phase 9 | **RESOLVED** | Trino Phase 6 (Tasks 6.1–6.6) + DF Phase 6 (Tasks 6.1–6.4) |
-| KG-14 | SIMD vectorization across engines | Phase 1, 5 | **OPEN** | Trino Task 3.6.A + DF Task 3.6.A + Velox Task 3.6.A |
+| KG-14 | SIMD vectorization across engines | Phase 1, 5 | **RESOLVED** | Trino Task 3.6.A + DF Task 3.6.A + Velox Task 3.6.A |
 
 New knowledge gaps discovered during implementation should follow the same process: formulate a research task, append to the tracing guide, execute, then integrate findings before proceeding.
 
@@ -753,4 +768,4 @@ New knowledge gaps discovered during implementation should follow the same proce
 | **Parquet reader performance gap** | Rust worker slower than Java on scan-heavy queries | The `parquet` crate is actively optimized. Profile early; contribute upstream fixes if needed. | **Open** |
 | **No cross-language golden fixtures exist** | Rust wire output may be semantically correct but byte-incompatible | KG-13 resolved: Trino tests verify semantic equality, not bytes. Must build golden file suites from Java (block encodings, hash values, JSON schemas, page binaries). | **Mitigated** |
 | **`DistributedQueryRunner` is in-process only** | Cannot plug Rust worker into existing integration tests | KG-13 resolved: Use standalone coordinator + HTTP announce protocol with `workerCount=0`. Product tests can inject via `EnvMultinodeRustWorker` Docker environment. | **Mitigated** |
-| **SIMD strategy unclear** | Suboptimal compute performance if relying solely on auto-vectorization | Resolve KG-14: study all three engines' SIMD approaches to determine optimal strategy (auto-vectorization, explicit SIMD, or hybrid). | **Open** |
+| **SIMD strategy unclear** | Suboptimal compute performance if relying solely on auto-vectorization | KG-14 resolved: hybrid approach — LLVM auto-vectorization for general compute (DataFusion pattern), explicit SIMD via `std::arch` for hash probing, wire format compress/expand, and bitmap operations (Velox pattern). Build with LTO + `-C target-cpu=native`. | **Mitigated** |

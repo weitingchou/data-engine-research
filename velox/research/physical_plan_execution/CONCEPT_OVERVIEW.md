@@ -185,3 +185,41 @@ SpillerBase::spill()
 | Coordination | Atomic peer-operator spilling (all or none) | Per-operator independent | Per-operator independent |
 | Recursive spill | Up to 4 levels via `SpillPartitionId` hierarchy | Recursive re-partition | Not supported |
 | Spill memory | Dedicated `spillMemoryPool()` (not arbitrated) | Revocable memory pool | Standard pool |
+
+## 7. Explicit SIMD & Hardware Vectorization
+
+Velox is the most aggressive of the three engines in using explicit SIMD intrinsics. Unlike Trino (targeted Vector API + auto-vectorization) and DataFusion (pure auto-vectorization), Velox maintains a full SIMD abstraction layer and hand-tunes its critical data paths.
+
+### Three-Layer Architecture
+
+1. **Layer 1: xsimd 10.0.0 + raw intrinsics.** The foundation uses xsimd (from xtensor-stack) as a portable SIMD type system (`xsimd::batch<T>`, `xsimd::batch_bool<T>`). Where xsimd falls short (gather, movemask, CRC32), Velox drops to raw intrinsics (`_mm256_i32gather_epi32`, `_mm256_movemask_epi8`, `__builtin_crc32`) behind compile-time guards.
+2. **Layer 2: SimdUtil abstraction (~1,950 lines).** Provides `toBitMask`, `fromBitMask`, `gather`, `maskGather`, `filter` (compress/permute), `leadingMask`, `memEqualUnsafe`, `simdStrstr`, `crc32U64`, `indicesOfSetBits`, and more. Pervasive **precomputed lookup tables** (`byteSetBits[256][8]`, `fromBitMask32/64`) turn variable-dependent operations into O(1) lookups.
+3. **Layer 3: Domain-specific hot paths.** Hash table tag probing, `Filter::testValues()`, `SplitBlockBloomFilter`, `ColumnVisitors` (I/O filter pushdown), SIMD substring search.
+
+### Compile-Time Dispatch (No Runtime CPUID)
+
+All dispatch is at compile time via `#if XSIMD_WITH_AVX2` / `SSE2` / `NEON` / `SVE` guards, resolved by `xsimd::default_arch` based on compiler flags. One binary per target architecture — no runtime function pointer indirection. **AVX-512 is intentionally avoided** due to frequency throttling on Intel CPUs; Velox caps at 256-bit (AVX2).
+
+### Hash Table: SIMD Tag Probing (The Crown Jewel)
+
+The `HashTable` uses Swiss-table-inspired design with 16-byte `TagVector` (always 128-bit SSE2/NEON):
+* **`ProbeState`** broadcasts the search tag, loads 16 tags in one instruction, compares all 16 in one instruction (`tagsInTable_ == wantedTags_`), and scans matches via `getAndClearLastSetBit`.
+* **Four-way interleaved probing** issues 4 prefetches, then 4 tag-loads, then 4 full-probes — hiding memory latency through software pipelining. By the time `state1.fullProbe()` executes, its bucket is in L1 cache.
+* **NormalizedKey fast path** stores concatenated 64-bit keys inline, avoiding row indirection for simple key types.
+
+### SIMD Filter Evaluation
+
+`Filter` subclasses implement `testValues(xsimd::batch<T>)` — applying predicates to an entire SIMD vector at once:
+* **`BigintRange`:** Two SIMD comparisons + AND for range checks (4 int64s per AVX2 instruction).
+* **`BigintValuesUsingHashTable` (IN-list):** SIMD hash probe via `maskGather` — 4 hash table lookups in parallel, with scalar fallback only for collisions.
+
+### Other SIMD Hot Paths
+
+* **Bloom filter:** Fully SIMD-native `SplitBlockBloomFilter` — each block is a SIMD register, `makeMask` derives 8 bit positions from the hash, probing checks all 8 in one `testc` instruction.
+* **SIMD substring search (`simdStrstr`):** Broadcasts first + last character of needle, scans 32 chars at once (AVX2), only falls back to `memcmp` on dual-match positions. Template-specialized for needle sizes 2–15.
+* **CRC32 hardware acceleration:** `_mm_crc32_u64` (x86) / inline asm `crc32cx` (ARM), 3-way unrolled to hide instruction latency.
+* **`gather8Bits`:** Gathers disjoint bits from a null bitmap at non-contiguous positions — single gather + AND + compare replaces 8 individual `isBitSet` calls.
+
+### Implications for the Rust Worker
+
+Velox's SIMD paths directly inform the Rust worker's critical optimization targets: (1) `hashbrown` already provides SSE2/NEON Swiss-table probing, but 4-way interleaved probing is a manual optimization worth replicating; (2) `std::arch` intrinsics for hash probe, bitmap gather, and filter compress; (3) compile-time dispatch via `#[cfg(target_feature)]` mirrors Velox's `#if XSIMD_WITH_AVX2` pattern; (4) precomputed lookup tables are zero-cost in Rust via `const` arrays.

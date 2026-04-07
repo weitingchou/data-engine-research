@@ -118,6 +118,40 @@ Because Trino processes data in memory, stateful operations (like massive Hash J
 
 * **Serialization:** Pages are written to round-robin striped temp files via `FileSingleStreamSpiller`, with optional LZ4/ZSTD compression and optional AES encryption. The striping enables parallel read-back across multiple I/O threads.
 
+## 6. SIMD & Vectorization Strategy
+
+Trino 480 does not use a single vectorization approach — it employs a **three-tier strategy** with different techniques for different subsystems.
+
+### Tier 1: Explicit Java Vector API (`jdk.incubator.vector`)
+
+The Vector API is used in exactly two subsystems — exchange serde and Parquet I/O — and is **mandatory** at startup (`TrinoSystemRequirements` checks for the module):
+
+* **Null-aware compress/expand:** When serializing blocks with nulls, `Vector.compress(VectorMask)` and `Vector.expand(VectorMask)` compact non-null values for the wire and re-expand on deserialization. These map to AVX-512 `VPCOMPRESSD`/`VPEXPAND` hardware instructions. Two strategies handle high-null data: a branchless loop (default) and a selective loop that skips all-null vectors.
+* **Null bit packing/unpacking:** `ByteVector.SPECIES_64` packs 8 booleans into one byte (MSB-first) via lane shifts + OR-reduce. The reverse direction broadcasts a packed byte and shifts/masks to extract individual bits.
+* **Parquet bit-unpacking:** `VectorIntBitUnpackers` provides per-bit-width (0–20) unpackers using broadcast + lane-specific shifts + mask, extracting 8 dictionary IDs per vector instruction.
+* **Runtime CPU feature detection:** `BlockEncodingSimdSupport` reads `/proc/cpuinfo` (Linux) at startup, checking `avx512f`, `avx512vbmi2` (x86), `sve`/`sve2` (ARM). Per-capability flags are wired through Guice to each `BlockEncoding` constructor.
+
+### Tier 2: SWAR (SIMD Within A Register)
+
+`FlatHash` — the Swiss-table hash map used by GROUP BY, JOIN, and aggregation — uses SWAR for 8-way parallel byte matching without the Vector API:
+
+* **`repeat(byte)`** broadcasts a byte to all 8 positions in a `long` via multiplication (`value * 0x01_01_01_01_01_01_01_01L`).
+* **`match(vector, repeatedValue)`** performs parallel equality: `(comparison - 0x0101...) & ~comparison & 0x8080...` sets the high bit in each matching byte (Hacker's Delight 6-1).
+* Results are decoded via `Long.numberOfTrailingZeros >>> 3` to find the matching slot index.
+* Triangular probing (`step += VECTOR_LENGTH`) with over-allocated control arrays to avoid bounds checks.
+
+### Tier 3: JVM Auto-Vectorization
+
+The bulk of the compute engine — bytecode-compiled filter/projection loops, type operators, hash computation — relies on HotSpot JIT auto-vectorization:
+
+* **Branchless selection pattern:** Generated filter loops use `outputPositionsCount += result ? 1 : 0` (CMOV-style), writing the position unconditionally and incrementing conditionally. Null checks are hoisted outside the loop via `mayHaveNull()`.
+* **Memory layout favors vectorization:** Fixed-width columns are flat Java arrays (`long[]`, `int[]`), giving the JIT contiguous access. Nullability is `boolean[]` (one byte per position, not packed bits) — an 8× memory trade-off for vectorization friendliness.
+* **Limitations:** Virtual dispatch (`invokedynamic`), complex function bodies, and indirect position-list access patterns prevent auto-vectorization in some paths.
+
+### Implications for the Rust Worker
+
+The three tiers map to clear Rust equivalents: SWAR → native SIMD via `hashbrown` (SSE2/NEON 16-way, already used); Vector API compress/expand → `std::arch` AVX-512 intrinsics or Arrow `filter` kernel; JVM auto-vectorization → LLVM auto-vectorization (strictly superior due to compile-time optimization). The `boolean[]` null representation is unnecessary in Rust — Arrow's packed bitmap with explicit SIMD/`pdep`/`pext` is both memory-efficient and fast.
+
 ## Summary: Connecting the Dots
 
 1.  Inside a Driver, **Operators** form a non-blocking, cooperative state machine. Many key operators are internally built as lazy `WorkProcessor` streams, adapted to the push-pull Operator interface.
@@ -126,3 +160,4 @@ Because Trino processes data in memory, stateful operations (like massive Hash J
 4.  **Expressions** arrive from the coordinator as a **JSON-serialized AST** — a sealed hierarchy of **18 node types** with fully resolved types, functions, and constants (base64-encoded Block binary). Workers translate through a two-level IR (`ir.Expression` → `RowExpression`) before JIT-compiling to JVM bytecode.
 5.  **Stateful operators** accumulate state in memory. Joins use a two-pipeline build/probe architecture with vectorized hash lookups. Aggregations use specialized `GroupByHash` implementations with adaptive partial/final splitting across the network.
 6.  Operators opt into spilling by reserving **revocable memory**. A `MemoryRevokingScheduler` triggers a two-phase async protocol. Hash joins try compaction first; aggregations spill sorted groups and merge-sort on read-back.
+7.  **SIMD is targeted, not pervasive.** Explicit Java Vector API covers exchange serde (compress/expand) and Parquet I/O (bit-unpacking). SWAR handles hash table probing. The general compute engine relies on auto-vectorization-friendly loop structures and branchless selection patterns.
