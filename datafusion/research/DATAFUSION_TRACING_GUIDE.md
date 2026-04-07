@@ -93,6 +93,19 @@ This is an atomic task list for analyzing the Apache DataFusion source code (and
   * **Target Crates/Files:** `datafusion-physical-expr` (`src/expressions/mod.rs`, `src/physical_expr.rs`), `arrow-ord` / `arrow-arith`
   * **Focus:** Analyze the `PhysicalExpr` trait and its `evaluate()` method. Trace a simple filter predicate. How does it evaluate to a `BooleanArray`? Trace the subsequent call to `arrow::compute::filter_record_batch` to see the SIMD application.
 
+### Task 3.6: SIMD & Vectorized Compute `[KG-14]`
+How does DataFusion/Arrow leverage SIMD hardware for columnar compute? This is the primary reference for the Rust worker's compute strategy.
+
+* **Task 3.6.A: Arrow Compute Kernel SIMD Architecture**
+    * **Target Crates/Files:** `arrow-arith/src/` (arithmetic kernels), `arrow-ord/src/` (comparison kernels), `arrow-select/src/filter.rs` (filter kernel), `arrow-string/src/` (string operations), `arrow-buffer/src/` (alignment), `datafusion-physical-expr/src/expressions/` (expression evaluation)
+    * **Focus:** Trace how Arrow compute achieves SIMD:
+      1. How does Arrow's **64-byte memory alignment** (cache-line aligned) enable SIMD? Trace the allocation path from `MutableBuffer` through `alloc::ALIGNMENT`.
+      2. Does Arrow-rs use explicit SIMD intrinsics (`std::arch`, `packed_simd`, `portable-simd`), or does it rely on LLVM auto-vectorization of tight loops? Check for `#[target_feature]` attributes.
+      3. Trace the inner loop of key kernels: `add_scalar`, `cmp_op`, `filter_array`, `cast_numeric`. Are these structured for auto-vectorization (no branches, contiguous arrays, `@llvm.assume.align`)?
+      4. How does Arrow's **null bitmap** (LSB-first, bit-packed) interact with SIMD? Is the null check vectorized? Are there specialized "no-null" fast paths?
+      5. How does `BooleanBufferBuilder` / bit-packing interact with SIMD for filter mask construction?
+      6. What role does Rust's `#[inline]` and LTO play in cross-crate kernel inlining?
+
 ### Task 3.3: Simple Pipelines
 * **Task 3.3: Simple Pipelines (Stateless Stream Nesting)**
   * **Target Crates/Files:** `datafusion-physical-plan` (`src/filter.rs`, `src/projection.rs`)

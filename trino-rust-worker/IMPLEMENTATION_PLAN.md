@@ -139,6 +139,12 @@ Arrow `RecordBatch` is the internal unit of computation. No custom columnar type
 
 **Decision rationale:** Arrow arrays are the industry standard for Rust columnar compute. DataFusion, Polars, and the entire arrow-rs ecosystem operate on them natively. Building custom types would duplicate effort and forfeit access to hundreds of optimized compute kernels. Trino's `Block` types map cleanly to Arrow array types. The wire format layer (Phase 1B) handles the translation at the boundary.
 
+**SIMD alignment:** Arrow's 64-byte memory alignment (cache-line aligned) is the foundation for SIMD acceleration. All `Buffer` allocations go through aligned allocators, enabling LLVM auto-vectorization of tight compute loops without explicit intrinsics. This alignment must be preserved throughout the pipeline — no unaligned copies between the wire format boundary and the compute layer.
+
+> **KNOWLEDGE GAP [KG-14]: SIMD Vectorization Across Engines**
+> To maximize SIMD hardware efficiency (GOAL.md Section 3 — "Compute & SIMD Acceleration"), we need to understand how each engine achieves vectorized compute: Trino's JVM auto-vectorization and SWAR tricks, DataFusion/Arrow's LLVM auto-vectorization with 64-byte alignment, and Velox's explicit SIMD intrinsics via `xsimd`. This determines whether the Rust worker should rely on auto-vectorization, use explicit SIMD (via `std::simd` or `packed_simd`), or adopt a hybrid approach.
+> **Required research tasks:** → `TRINO_TRACING_GUIDE.md` Task 3.6.A, `DATAFUSION_TRACING_GUIDE.md` Task 3.6.A, `VELOX_TRACING_GUIDE.md` Task 3.6.A
+
 #### 1B. Trino Wire Format (`trw-protocol`)
 
 Implement serialization/deserialization of Trino's binary page format so data can flow between Java and Rust workers.
@@ -725,6 +731,7 @@ All 13 knowledge gaps have been **resolved** via research tasks in the TRINO_TRA
 | KG-11 | Partition hash function for shuffle | Phase 6 | **RESOLVED** | Task 4.2.F |
 | KG-12 | Exchange protocol HTTP headers | Phase 6 | **RESOLVED** | Task 4.2.G |
 | KG-13 | Trino & DataFusion test structure | Phase 9 | **RESOLVED** | Trino Phase 6 (Tasks 6.1–6.6) + DF Phase 6 (Tasks 6.1–6.4) |
+| KG-14 | SIMD vectorization across engines | Phase 1, 5 | **OPEN** | Trino Task 3.6.A + DF Task 3.6.A + Velox Task 3.6.A |
 
 New knowledge gaps discovered during implementation should follow the same process: formulate a research task, append to the tracing guide, execute, then integrate findings before proceeding.
 
@@ -746,3 +753,4 @@ New knowledge gaps discovered during implementation should follow the same proce
 | **Parquet reader performance gap** | Rust worker slower than Java on scan-heavy queries | The `parquet` crate is actively optimized. Profile early; contribute upstream fixes if needed. | **Open** |
 | **No cross-language golden fixtures exist** | Rust wire output may be semantically correct but byte-incompatible | KG-13 resolved: Trino tests verify semantic equality, not bytes. Must build golden file suites from Java (block encodings, hash values, JSON schemas, page binaries). | **Mitigated** |
 | **`DistributedQueryRunner` is in-process only** | Cannot plug Rust worker into existing integration tests | KG-13 resolved: Use standalone coordinator + HTTP announce protocol with `workerCount=0`. Product tests can inject via `EnvMultinodeRustWorker` Docker environment. | **Mitigated** |
+| **SIMD strategy unclear** | Suboptimal compute performance if relying solely on auto-vectorization | Resolve KG-14: study all three engines' SIMD approaches to determine optimal strategy (auto-vectorization, explicit SIMD, or hybrid). | **Open** |

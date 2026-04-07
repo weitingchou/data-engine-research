@@ -109,6 +109,18 @@ Tracing the simplest data flow where one input page directly results in one or m
       5. How does the worker reconstruct executable expressions from this wire format? Trace from JSON deserialization to `PageProcessor` compilation.
       6. Capture concrete JSON for: a comparison (`col1 > 10`), an arithmetic expression (`col1 + col2 * 3`), a function call (`UPPER(name)`), and a CAST expression.
 
+### Task 3.6: Vectorization & SIMD Utilization `[KG-14]`
+How does Trino leverage CPU vectorization for columnar compute? Critical for understanding what performance the Java worker achieves versus what the Rust worker can target with native SIMD.
+
+* **Task 3.6.A: JVM Auto-Vectorization & Explicit SIMD**
+    * **Target Files:** `io.trino.operator.project.PageProcessor`, `io.trino.sql.gen.ColumnarFilterCompiler`, `io.trino.sql.gen.PageFunctionCompiler`, `io.trino.type.TypeOperators`, hash function implementations (`XxHash64`), `io.trino.spi.block.*Block` (bulk read/write loops)
+    * **Focus:** Analyze Trino's relationship with SIMD hardware:
+      1. Does Trino use explicit SIMD intrinsics (e.g., Java Vector API / `jdk.incubator.vector`)? Or does it rely solely on JVM auto-vectorization of tight loops?
+      2. How do the bytecode-compiled filter/projection expressions interact with JIT vectorization? Does the `ColumnarFilterCompiler` (columnar path) produce loops that HotSpot can auto-vectorize?
+      3. Trace the inner loops of critical compute paths: hash computation (`XxHash64`), comparison operators, arithmetic, string operations. Are these structured for auto-vectorization (no branches, contiguous memory access, fixed-width types)?
+      4. What is the impact of Trino's MSB-first null bitmap on vectorization? Does the null-check loop prevent auto-vectorization?
+      5. How does the `SWAR` (SIMD Within A Register) byte-level probing in `FlatGroupByHash` work? Is this Trino's closest equivalent to explicit SIMD?
+
 ### Task 3.4: Stateful & Complex Pipelines
 Tracing operations that must hold state across multiple `addInput()` calls, and operations that bridge multiple Pipelines.
 

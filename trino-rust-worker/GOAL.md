@@ -27,7 +27,7 @@ The worker will not be a 1:1 line-by-line port of the Java worker. Instead, it w
 * **From Apache DataFusion (The Engine & Concurrency):**
   * **Async Volcano Model:** Replacing Trino's custom `Driver` yield loop with Rust's native `tokio` asynchronous runtime and the `Stream` trait (`poll_next()`).
   * **Memory Safety:** Leveraging Rust's RAII (Resource Acquisition Is Initialization) pattern for memory reservations to eliminate the possibility of memory accounting leaks.
-  * **Compute:** Delegating vectorized expression evaluation to Apache Arrow compute kernels.
+  * **Compute & SIMD Acceleration:** Delegating expression evaluation to Apache Arrow compute kernels, leveraging 64-byte memory alignment and Rust/LLVM auto-vectorization to maximize SIMD (Single Instruction, Multiple Data) hardware efficiency, achieving bare-metal speeds without JVM GC overhead.
 * **From Meta Velox (The Memory & Optimization Patterns):**
   * **Cross-Language/Protocol Memory Bridges:** Adopting Velox's strict `MemoryPool` and `MemoryArbitrator` designs to safely manage memory when interacting with external constraints (like the Java Coordinator's expectations).
   * **Data Structures:** Adopting customized, highly optimized physical data layouts where standard Arrow buffers fall short (e.g., utilizing Velox-style `StringView` prefixes for faster sorting and hashing).

@@ -72,6 +72,19 @@ This is an atomic task list for analyzing the Meta Velox source code. **DO NOT a
   * **Target Files:** `velox/expression/Expr.h`, `velox/expression/EvalCtx.h`, `velox/functions/`
   * **Focus:** Trace how a `PlanNode` expression is compiled into an `Expr` tree. Because Velox does not JIT compile, trace the vectorized loop inside `Expr::eval()`. How does it use `SelectivityVector` to skip evaluating nulls or filtered rows across a batch?
 
+### Task 3.6: Explicit SIMD & Vectorization `[KG-14]`
+How does Velox use explicit SIMD intrinsics for columnar compute? Velox is the most aggressive of the three engines in hand-tuned SIMD — this is the "ceiling" reference for what the Rust worker could achieve.
+
+* **Task 3.6.A: SIMD Intrinsics & xsimd Usage**
+    * **Target Files:** `velox/common/base/SimdUtil.h`, `velox/common/base/SimdUtil-inl.h`, `velox/type/Filter.h` (SIMD filter), `velox/functions/lib/` (SIMD-optimized functions), `velox/exec/HashTable.h` (SIMD probing), `velox/common/memory/HashStringAllocator.h`
+    * **Focus:** Trace Velox's explicit SIMD usage:
+      1. What SIMD library does Velox use? (`xsimd`? Raw intrinsics? Both?) What instruction sets are targeted (SSE4.2, AVX2, AVX-512, NEON)?
+      2. Trace the SIMD-optimized hot paths: hash table probing (tag-byte matching), string comparison, null bitmap operations, filter evaluation, gather/scatter operations.
+      3. How does `SimdUtil` abstract across instruction sets? Is there a runtime dispatch mechanism (CPUID check)?
+      4. How does Velox's `SelectivityVector` enable SIMD-friendly iteration (skip null/filtered rows in vectorized batches)?
+      5. How do Velox's `StringView` prefixes (inline first 4/12 bytes) enable SIMD-accelerated string comparison without pointer chasing?
+      6. What is the performance impact? Are there benchmarks comparing SIMD vs. scalar paths?
+
 ### Task 3.3: Stateless Pipelines
 * **Task 3.3: Stateless Operations (Filter & Project)**
   * **Target Files:** `velox/exec/FilterProject.h`, `velox/exec/FilterProject.cpp`
