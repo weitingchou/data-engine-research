@@ -270,6 +270,22 @@ How the worker interacts with the SPI (Service Provider Interface) to get raw da
       2. `IcebergSplit`: file path, start offset, length, file format (PARQUET/ORC), partition spec, residual filter expression, etc.
       3. How is the `ConnectorSplit` polymorphism handled in JSON? (Connector-specific `@type` tag? A wrapper with `connectorId` + opaque JSON blob?)
       4. How are split assignments bundled? (`SplitAssignment` → list of `ScheduledSplit` → `Split` → `ConnectorSplit`)
+* **Task 4.3.D: Iceberg PageSource & Delete File Handling** `[KG-ICE-1]`
+    * **Target Files:** `io.trino.plugin.iceberg.IcebergPageSource`, `io.trino.plugin.iceberg.IcebergPageSourceProvider`, `io.trino.plugin.iceberg.delete.PositionDeleteFilter`, `io.trino.plugin.iceberg.delete.EqualityDeleteFilter`, `io.trino.plugin.iceberg.IcebergParquetPageSource`
+    * **Focus:** Trace the Iceberg connector's read pipeline from split to pages:
+      1. How does `IcebergPageSourceProvider.createPageSource()` construct the page source from an `IcebergSplit`? How does it select the format reader (Parquet vs ORC)?
+      2. How does `IcebergPageSource` wrap the underlying format-specific page source (e.g., Parquet reader)?
+      3. **Delete file handling (MOR):** How are positional delete files applied? How are equality delete files applied? At what stage in the pipeline do deletes filter out rows — before or after the format reader produces pages?
+      4. **Schema evolution:** When the data file was written under an older schema, how does the connector project/coerce columns to match the current query schema? Trace the `SchemaParser` and column ID-based mapping.
+      5. How does `IcebergSplit.deleteFiles` flow into the page source construction?
+* **Task 4.3.E: Iceberg PageSink & Commit Protocol** `[KG-ICE-2]`
+    * **Target Files:** `io.trino.plugin.iceberg.IcebergPageSink`, `io.trino.plugin.iceberg.IcebergPageSinkProvider`, `io.trino.plugin.iceberg.IcebergMetadata` (focus on `finishInsert`, `finishCreateTable`), `io.trino.plugin.iceberg.IcebergWritableTableHandle`
+    * **Focus:** Trace the Iceberg connector's write pipeline:
+      1. How does `IcebergPageSink` write pages to Parquet files on object storage? How is the output file path determined (partition layout, file naming)?
+      2. How does the partition spec control file organization? How are rows routed to partition-specific writers?
+      3. What do the fragment `Slice`s returned by `finish()` contain? (File path, metrics, partition data?)
+      4. How does `IcebergMetadata.finishInsert()` collect fragments from all workers and perform the atomic Iceberg commit (append snapshot)?
+      5. How does the write transaction handle rollback on failure (`abort()`)?
 
 ---
 
