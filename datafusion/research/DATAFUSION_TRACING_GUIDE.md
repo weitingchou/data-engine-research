@@ -134,6 +134,17 @@ How does DataFusion/Arrow leverage SIMD hardware for columnar compute? This is t
   * **Target Crates/Files:** `datafusion-core` (`src/datasource/physical_plan/parquet/`), `parquet` crate (`src/arrow/async_reader/`), `object_store`
   * **Focus:** Trace the full Parquet scan pipeline inside `ParquetExec`. How does row-group pruning use min/max statistics? How does page index pruning work? How does the row-level `RowFilter` apply pushed-down predicates during decode? Trace `object_store` byte-range fetching and how it integrates with `tokio` for async I/O.
 
+### Task 4.1.C: Iceberg Integration & Delete File Handling
+* **Task 4.1.C: DataFusion Iceberg Integration & Delete File Handling** `[KG-ICE-4]`
+  * **Target Crates/Files:** `iceberg-rust` repo — `crates/iceberg/src/scan.rs`, `crates/iceberg/src/delete_file_manager.rs` (or equivalent), `crates/datafusion/src/` (DataFusion integration module), `crates/iceberg/src/arrow/` (Arrow bridge)
+  * **Focus:** Trace how the `iceberg-rust` project integrates with DataFusion:
+    1. How does the Iceberg `TableProvider` implementation translate `scan()` (with projections, filters, limit) into Iceberg table scans? How does it map DataFusion's `Expr` filters to Iceberg's predicate format?
+    2. **Delete file handling:** How are positional delete files applied? How are equality delete files applied? At what stage — during Parquet decode, as a post-filter on RecordBatches, or via a separate stream combinator? What is the merge-on-read (MOR) pipeline architecture?
+    3. **Schema evolution:** How does the reader handle data files written under older schemas? Is column ID-based mapping used (like Trino) or name-based?
+    4. **Predicate pushdown:** How do Iceberg partition predicates flow down to row-group pruning in the Parquet reader? Is there a multi-level pushdown (partition → file → row-group → page)?
+    5. **Snapshot isolation:** How is a consistent snapshot selected for a scan? How does time-travel work?
+    6. Compare the maturity and completeness of this implementation vs. Trino's Java Iceberg connector (Task 4.3.D).
+
 ### Task 4.2: The Local Data Plane
 * **Task 4.2: The Local Data Plane (Intra-Node Exchange) — Cross-Reference**
   * **Reference:** See Phase 2, Task 2.4.B (`23_datafusion_48_2.4.B_local_repartitioning.md`)
