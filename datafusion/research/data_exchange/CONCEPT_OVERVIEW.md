@@ -44,6 +44,20 @@ The Parquet scan is the most complex storage path, orchestrated by a **10-state 
 
 * **No Default Metadata Caching:** `DefaultParquetFileReaderFactory` reads the footer on every file open. `CachedParquetFileReaderFactory` exists but must be explicitly configured — caching policy is left to the integrator.
 
+### Iceberg Integration (via iceberg-rust)
+
+The `apache/iceberg-rust` project provides a DataFusion integration module — the closest Rust-native reference for the Rust worker's Iceberg connector.
+
+* **TableProvider:** Two implementations — `IcebergTableProvider` (catalog-backed) and `IcebergStaticTableProvider` (static/time-travel). The DataFusion layer is intentionally thin: it translates `Expr` filters to Iceberg predicates and wraps the result stream. All heavy lifting happens in the `iceberg` core crate.
+* **Delete File Handling (MOR):** Both delete types are applied DURING Parquet decode, not as post-filters:
+  - **Positional deletes** become `RowSelection` masks — deleted rows are never materialized (contrast with Trino which applies deletes after reading).
+  - **Equality deletes** are converted to negated predicates and flow through the standard RowFilter/RowGroup pruning pipeline.
+  - A `CachingDeleteFileLoader` with `Notify`-based coordination deduplicates loading when multiple data files share delete files.
+* **Schema Evolution:** Field-ID-based mapping (like Trino) with a 3-branch strategy: embedded field IDs (normal), name mapping (Hive migration), or position-based fallback. Type promotion supports Int→Long, Float→Double, Decimal widening, Fixed(16)→Uuid.
+* **Predicate Pushdown:** Complete 6-level pipeline: manifest pruning → partition evaluation → file-level inclusive metrics → row group statistics → page index → row-level filter. Page index pruning is off by default due to overhead tradeoffs.
+* **Snapshot Isolation:** Snapshot locked at `TableScanBuilder::build()` time. Time-travel via `IcebergStaticTableProvider::try_new_from_table_snapshot()`.
+* **Gaps vs. Trino:** No deletion vectors (V3/Puffin), no distributed split generation (single-partition plan), no MERGE/UPDATE/DELETE DML, limited catalog diversity. Read path is mature; write path supports INSERT INTO partitioned tables.
+
 ## 2. The Local Data Plane (Intra-Node Shuffle)
 
 *Fully covered in Phase 2, Task 2.4.B (`23_datafusion_48_2.4.B_local_repartitioning.md`).*
@@ -109,3 +123,4 @@ In a single-node setup, the Control Plane is simply the `SessionContext` in memo
 3. **Local data exchange** (RepartitionExec) uses custom Gate-based channels with backpressure, hash/round-robin routing, and spill-to-disk. *(See Phase 2, Task 2.4.B for full details.)*
 4. **Arrow Flight** provides zero-copy network transfer via gRPC/HTTP2 streaming with Arrow IPC format. The `FlightDataEncoder` splits batches to ~2MB targets; the `FlightDataDecoder` wraps network bytes directly into `Buffer` references without copying.
 5. **Plan serialization** uses protobuf with a recursive `PhysicalPlanNode` structure. Runtime state is excluded — the receiving side reconstructs it from `TaskContext`. Three extension points allow custom operators, conversion strategies, and codec composition.
+6. **Iceberg integration** (via `iceberg-rust`) provides a thin `TableProvider` layer with 6-level predicate pushdown, delete-during-decode (positional as `RowSelection`, equality as negated predicates), field-ID-based schema evolution, and snapshot isolation. Read path is mature; write supports INSERT INTO.

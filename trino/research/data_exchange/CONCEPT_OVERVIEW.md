@@ -120,7 +120,24 @@ Shuffle partitioning uses a four-stage pipeline:
 3. **Hash-to-partition:** Lemire "fastrange" multiply-shift: `(Integer.toUnsignedLong(Long.hashCode(rawHash)) * partitionCount) >>> 32`. Avoids modulo bias without division.
 4. **Bucket-to-partition indirection:** A `bucketToPartition` array decouples hash buckets from output partitions.
 
-### 5.6. Split JSON Formats
+### 5.6. Iceberg Connector Internals
+
+The Iceberg connector is the primary connector target for the Rust worker (Lakehouse architecture).
+
+**Read Path (IcebergPageSource):**
+* `IcebergPageSourceProvider.createPageSource()` dispatches on `IcebergFileFormat` (PARQUET/ORC/AVRO) to construct a format-specific reader. Each path maps Iceberg field IDs to physical file columns, wraps the reader in a `TransformConnectorPageSource` for column projection (partition values, constants, nested field dereferencing).
+* **Delete handling is post-reader:** Deletes are applied AFTER the format reader produces pages, via `RowPredicate.applyFilter()` that mutates `SourcePage` with `selectPositions()`. The predicate is lazily constructed (memoized) on first page access.
+* **Three delete mechanisms** (AND-composed): (1) **Deletion vectors** — RoaringBitmaps in Puffin files (preferred per Iceberg V3 spec); (2) **Position delete files** — read into a DeletionVector with pushdown on `file_path` + position range; (3) **Equality delete files** — loaded into a ConcurrentHashMap keyed by field values, with sequence-number-based ordering.
+* **Schema evolution:** Field-ID-based mapping (`createParquetIdToFieldMapping` for Parquet, `OrcIcebergIds.fileColumnsByIcebergId` for ORC). Missing columns get `initialDefault` or null. `NameMapping` is a fallback for files lacking embedded field IDs.
+
+**Write Path (IcebergPageSink → Atomic Commit):**
+* `IcebergPageSink.appendPage()` routes each row to a partition-specific `IcebergFileWriter` via a `PagePartitioner`. Partition transforms (identity, year, month, bucket, truncate) are applied as `Function<Block, Block>`. Writers are created lazily and rotated when exceeding `targetMaxFileSize`.
+* File paths: `<table_location>/data/<partition_path>/<queryId>-<UUID>.<ext>` via Iceberg's `LocationProvider`.
+* Each closed writer produces a `CommitTaskData` record (JSON in a `Slice`): file path, format, size, full column-level Iceberg `Metrics` (record count, column sizes, null counts, min/max bounds), partition spec JSON, partition values, split offsets.
+* **Atomic commit:** `IcebergMetadata.finishInsert()` deserializes all fragment Slices from all workers, builds `DataFile` objects, appends via Iceberg's `AppendFiles` API, and calls `commitTransaction()` — a single atomic snapshot creation. Workers never touch metadata.
+* **Rollback:** Each writer registers a rollback action (delete orphan file). On `abort()`, all actions fire and the Iceberg transaction is abandoned.
+
+### 5.7. Split JSON Formats
 
 Splits are wrapped in a four-level nesting: `SplitAssignment` (plan node ID + splits + `noMoreSplits` flag) → `ScheduledSplit` (`sequenceId` for idempotent delivery) → `Split` (`CatalogHandle` string + polymorphic `ConnectorSplit`) → concrete split.
 
@@ -139,3 +156,4 @@ Splits are wrapped in a four-level nesting: `SplitAssignment` (plan node ID + sp
 7.  Shuffle partitioning uses a **custom xxHash64 mix** with **Lemire fastrange** reduction for bias-free partition assignment.
 8.  **Worker** reports **TaskStatus** (22 fields) with version-based long-polling; **Dynamic Filters** flow through a two-tier coordination path.
 9.  For writes, **fragment descriptors** flow upward to the Coordinator for **atomic two-phase commit** via the Connector SPI.
+10. The **Iceberg connector** applies three delete mechanisms post-read (deletion vectors, position deletes, equality deletes), uses field-ID-based schema evolution, and performs atomic commits via `AppendFiles` snapshots.
