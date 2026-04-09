@@ -1,5 +1,33 @@
 # Phase 4: Data Exchange — Inter-Node Shuffle & Storage I/O (Velox)
 
+## Table of Contents
+- [1. The Host Control Boundary: `exec::Task` as Sole Entry Point](#1-the-host-control-boundary-exectask-as-sole-entry-point)
+  - [Library-as-a-Service, Not Server-as-a-Service](#library-as-a-service-not-server-as-a-service)
+  - [Seven Host-Facing Methods](#seven-host-facing-methods)
+  - [Task State Machine](#task-state-machine)
+- [2. Output Buffers: Serialization on the Driver Thread](#2-output-buffers-serialization-on-the-driver-thread)
+  - [Three-Layer Architecture](#three-layer-architecture)
+  - [Three Distribution Modes](#three-distribution-modes)
+  - [Serialization Design](#serialization-design)
+  - [Backpressure](#backpressure)
+- [3. Exchange Client: Fetch Coordination With Pluggable Transport](#3-exchange-client-fetch-coordination-with-pluggable-transport)
+  - [The Factory Pattern as the Transport Boundary](#the-factory-pattern-as-the-transport-boundary)
+  - [Two-Phase Fetch Protocol](#two-phase-fetch-protocol)
+  - [Shared Client, Independent Consumers](#shared-client-independent-consumers)
+  - [Self-Sustaining Request Chain](#self-sustaining-request-chain)
+  - [Progressive Fetching](#progressive-fetching)
+- [4. Connector SPI: Single-Shot Pushdown With SIMD-Native Filters](#4-connector-spi-single-shot-pushdown-with-simd-native-filters)
+  - [The Narrow Contract](#the-narrow-contract)
+  - [Three-Tier Filter Architecture](#three-tier-filter-architecture)
+  - [The ScanSpec Tree: Unified Filter + Projection](#the-scanspec-tree-unified-filter--projection)
+  - [Single-Shot vs. Multi-Round Pushdown](#single-shot-vs-multi-round-pushdown)
+  - [Dynamic Filter Injection](#dynamic-filter-injection)
+- [5. Comparison with Trino and DataFusion](#5-comparison-with-trino-and-datafusion)
+  - [Host Control Boundary](#host-control-boundary)
+  - [Output Buffering](#output-buffering)
+  - [Exchange Client](#exchange-client)
+  - [Connector SPI & Predicate Pushdown](#connector-spi--predicate-pushdown)
+
 Velox is a library, not a server — it has no REST endpoint, no HTTP layer, no built-in wire protocol for inter-node communication. Instead, it defines precise C++ API boundaries where the host application (Prestissimo, Spark Gluten, etc.) plugs in. Data exchange spans four boundaries: the `exec::Task` control API where the host pushes plan fragments and splits, the `OutputBuffer` system where serialized results queue for downstream consumers, the `ExchangeClient` fetch coordinator where upstream data is pulled through a host-provided transport abstraction, and the `Connector` SPI where storage I/O and predicate pushdown meet the file reader. The unifying design principle is **separation of coordination from transport** — Velox handles all scheduling, memory budgeting, backpressure, and serialization logic internally, but delegates network transport and storage access to pluggable host-provided implementations.
 
 ## 1. The Host Control Boundary: `exec::Task` as Sole Entry Point

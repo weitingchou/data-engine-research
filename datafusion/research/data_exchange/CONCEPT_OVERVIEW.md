@@ -1,5 +1,22 @@
 # Phase 4: Communication Interfaces & Data Exchange Overview (DataFusion)
 
+## Table of Contents
+- [1. The Storage Plane (Core <-> `object_store` / Connectors)](#1-the-storage-plane-core---object_store--connectors)
+  - [The TableProvider Contract](#the-tableprovider-contract)
+  - [The Write Path](#the-write-path)
+  - [The Parquet Scan Pipeline](#the-parquet-scan-pipeline)
+  - [Iceberg Integration (via iceberg-rust)](#iceberg-integration-via-iceberg-rust)
+- [2. The Local Data Plane (Intra-Node Shuffle)](#2-the-local-data-plane-intra-node-shuffle)
+- [3. The Distributed Data Plane (Over-The-Wire via Arrow Flight)](#3-the-distributed-data-plane-over-the-wire-via-arrow-flight)
+  - [Encoding Pipeline (FlightDataEncoder)](#encoding-pipeline-flightdataencoder)
+  - [Decoding Pipeline (FlightDataDecoder)](#decoding-pipeline-flightdatadecoder)
+  - [Flight vs. Trino Exchange](#flight-vs-trino-exchange)
+- [4. The Control Plane (Plan Serialization via Protobuf)](#4-the-control-plane-plan-serialization-via-protobuf)
+  - [Serialization Architecture](#serialization-architecture)
+  - [Runtime State Boundary](#runtime-state-boundary)
+  - [Plan Serialization vs. Trino](#plan-serialization-vs-trino)
+- [Summary: Connecting the Dots](#summary-connecting-the-dots)
+
 To build a worker or understand DataFusion's networking and storage boundaries, we must map out its three interface planes: Storage (Connector), Local Data (Intra-node Shuffle), and Distributed Network (Arrow Flight / Ballista).
 
 Unlike Trino, DataFusion core is an embeddable engine. Its "Control Plane" and "Distributed Data Plane" are often delegated to external schedulers like Apache/DataFusion-Ballista.

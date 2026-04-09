@@ -1,5 +1,17 @@
 # Phase 5: Memory Tracking & Arbitration Overview (DataFusion)
 
+## Table of Contents
+- [1. The Single Pool](#1-the-single-pool)
+- [2. The Flat Tracking Model (No Hierarchy)](#2-the-flat-tracking-model-no-hierarchy)
+- [3. The RAII Reservation Pattern](#3-the-raii-reservation-pattern)
+  - [Split Reservations](#split-reservations)
+- [4. The `can_spill` Contract](#4-the-can_spill-contract)
+- [5. Pull-Based Spilling vs. Push-Based Revocation](#5-pull-based-spilling-vs-push-based-revocation)
+  - [Operator Spill Patterns](#operator-spill-patterns)
+- [6. Task Context and Global Limits](#6-task-context-and-global-limits)
+- [7. No Cluster Arbitration](#7-no-cluster-arbitration)
+- [8. Summary: DataFusion vs. Trino Memory Model](#8-summary-datafusion-vs-trino-memory-model)
+
 DataFusion's memory management is architecturally simpler than Trino's but achieves comparable safety guarantees through Rust's ownership model. Where Trino builds a hierarchical tracking tree with explicit locking and GC-based size estimation, DataFusion uses a flat pool with RAII-based reservations that make memory leaks structurally impossible.
 
 ## 1. The Single Pool

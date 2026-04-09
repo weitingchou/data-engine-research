@@ -1,5 +1,16 @@
 # Phase 1: Foundation — Memory Layout & The Ingestion Bridge (Velox)
 
+## Table of Contents
+- [1. The Data Hierarchy: Buffer → Vector → RowVector](#1-the-data-hierarchy-buffer--vector--rowvector)
+  - [`Buffer` — The Byte Substrate (Trino's `Slice`, DataFusion's `Buffer`)](#buffer--the-byte-substrate-trinos-slice-datafusions-buffer)
+  - [`BaseVector` / `FlatVector` — The Columnar Accessor (Trino's `Block`, DataFusion's `Array`)](#basevector--flatvector--the-columnar-accessor-trinos-block-datafusions-array)
+  - [`RowVector` — The Envelope (Trino's `Page`, DataFusion's `RecordBatch`)](#rowvector--the-envelope-trinos-page-datafusions-recordbatch)
+- [2. From Storage to Memory: The DWIO Ingestion Pipeline](#2-from-storage-to-memory-the-dwio-ingestion-pipeline)
+  - [The Four-Phase Pipeline](#the-four-phase-pipeline)
+  - [Key Design Choices](#key-design-choices)
+  - [Comparison with Trino and DataFusion Ingestion](#comparison-with-trino-and-datafusion-ingestion)
+- [3. Memory Tracking Overview](#3-memory-tracking-overview)
+
 Velox is a C++ vectorized execution engine designed by Meta as an embeddable library. Its memory model sits between Trino's JVM-managed heap and DataFusion's Rust RAII approach — Velox uses explicit `MemoryPool`-tracked allocations with intrusive reference counting and copy-on-write semantics. This phase maps the data hierarchy from the lowest byte-level `Buffer` up through the `RowVector` that flows through the operator pipeline.
 
 ## 1. The Data Hierarchy: Buffer → Vector → RowVector

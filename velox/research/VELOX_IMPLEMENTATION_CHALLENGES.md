@@ -1,5 +1,13 @@
 # Meta Velox: Implementation Challenges & Architecture
 
+## Table of Contents
+- [1. The Steep Learning Curve of Vectorized Code](#1-the-steep-learning-curve-of-vectorized-code)
+- [2. The Semantic Gap Between SQL Dialects](#2-the-semantic-gap-between-sql-dialects)
+- [3. String Representation and Out-of-Order Writes](#3-string-representation-and-out-of-order-writes)
+- [4. Deep Dive: Memory Management Across Language Boundaries](#4-deep-dive-memory-management-across-language-boundaries)
+  - [The "Invisible Memory" Problem](#the-invisible-memory-problem)
+  - [The Solution: The JVM as the "Banker"](#the-solution-the-jvm-as-the-banker)
+
 Building Velox as a unified, high-performance C++ execution engine to serve fundamentally different host databases (Presto, Spark, etc.) revealed several critical friction points. Here are the primary challenges and architectural solutions detailed by the Velox team.
 
 ## 1. The Steep Learning Curve of Vectorized Code

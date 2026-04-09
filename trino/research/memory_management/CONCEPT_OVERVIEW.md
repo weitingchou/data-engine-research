@@ -1,5 +1,12 @@
 # Phase 5: Memory Tracking & Arbitration Overview
 
+## Table of Contents
+- [1. The Single Pool](#1-the-single-pool)
+- [2. The Tracking Tree](#2-the-tracking-tree)
+- [3. User Memory vs. Revocable Memory](#3-user-memory-vs-revocable-memory)
+- [4. Revocation: The Pressure Relief Valve](#4-revocation-the-pressure-relief-valve)
+- [5. Cluster Arbitration: The OOM Killer](#5-cluster-arbitration-the-oom-killer)
+
 In a distributed SQL engine, memory is the most constrained resource. While Trino runs on the JVM with garbage collection, the engine cannot rely on the GC to prevent Out-Of-Memory crashes. Instead, Trino implements a strict, manual accounting system where every byte must be explicitly tracked before allocation.
 
 ## 1. The Single Pool

@@ -1,5 +1,38 @@
 # Phase 3: Operator Internals & Data Processing — Physical Plan Execution (Velox)
 
+## Table of Contents
+- [1. The Operator Contract: A Volcano-Style State Machine](#1-the-operator-contract-a-volcano-style-state-machine)
+  - [Five Methods, Near-Identical to Trino](#five-methods-near-identical-to-trino)
+  - [Operator State: Implicit in Base, Explicit in Complex Operators](#operator-state-implicit-in-base-explicit-in-complex-operators)
+- [2. Vectorized Expression Evaluation: No JIT, No Row-at-a-Time](#2-vectorized-expression-evaluation-no-jit-no-row-at-a-time)
+  - [Compilation Pipeline](#compilation-pipeline)
+  - [Multi-Level Evaluation Dispatch](#multi-level-evaluation-dispatch)
+  - [The Vectorized Inner Loop](#the-vectorized-inner-loop)
+  - [AND/OR Short-Circuit (ConjunctExpr)](#andor-short-circuit-conjunctexpr)
+- [3. FilterProject: Stateless Vectorized Operator](#3-filterproject-stateless-vectorized-operator)
+  - [Filter-Project Fusion](#filter-project-fusion)
+  - [Processing Flow](#processing-flow)
+  - [Key Optimizations](#key-optimizations)
+- [4. Hash Join: Split Pipeline with Barrier Coordination](#4-hash-join-split-pipeline-with-barrier-coordination)
+  - [Build Side (`HashBuild`)](#build-side-hashbuild)
+  - [Probe Side (`HashProbe`)](#probe-side-hashprobe)
+  - [Dynamic Filter Pushdown](#dynamic-filter-pushdown)
+- [5. Disk Spilling: Proactive, Reservation-Based](#5-disk-spilling-proactive-reservation-based)
+  - [Trigger Mechanism](#trigger-mechanism)
+  - [Spill Execution Pipeline](#spill-execution-pipeline)
+  - [Key Design Choices](#key-design-choices)
+- [6. Comparison with Trino and DataFusion](#6-comparison-with-trino-and-datafusion)
+  - [Expression Evaluation](#expression-evaluation)
+  - [Hash Join](#hash-join)
+  - [Spilling](#spilling)
+- [7. Explicit SIMD & Hardware Vectorization](#7-explicit-simd--hardware-vectorization)
+  - [Three-Layer Architecture](#three-layer-architecture)
+  - [Compile-Time Dispatch (No Runtime CPUID)](#compile-time-dispatch-no-runtime-cpuid)
+  - [Hash Table: SIMD Tag Probing (The Crown Jewel)](#hash-table-simd-tag-probing-the-crown-jewel)
+  - [SIMD Filter Evaluation](#simd-filter-evaluation)
+  - [Other SIMD Hot Paths](#other-simd-hot-paths)
+  - [Implications for the Rust Worker](#implications-for-the-rust-worker)
+
 Velox executes queries through a Volcano-style pull-based operator pipeline where each `Driver` thread walks its operator chain from sink to source, calling `isBlocked()` / `needsInput()` / `getOutput()` / `addInput()` in a tight cooperative loop. What distinguishes Velox from traditional interpreters is that every operator processes entire columnar batches at once, gated by a `SelectivityVector` bitmask — no row-by-row iteration in the hot path. Expression evaluation is interpreted (no JIT) but compensates through compile-time template specialization, encoding peeling, and adaptive conjunct reordering. Stateful operators like hash join use split pipelines with barrier-based coordination and SIMD-accelerated probing. When memory pressure hits, operators spill to disk using the Presto wire-protocol serializer, triggered proactively through the memory reservation system rather than reactively on OOM.
 
 ## 1. The Operator Contract: A Volcano-Style State Machine

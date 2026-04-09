@@ -1,5 +1,31 @@
 # KG-ICE-3: Rust Iceberg/Parquet Ecosystem Assessment
 
+## Table of Contents
+- [1. iceberg-rust (Apache)](#1-iceberg-rust-apache)
+  - [1.1 Project Overview](#11-project-overview)
+  - [1.2 Catalog Support](#12-catalog-support)
+  - [1.3 Scan Planning & Pruning](#13-scan-planning--pruning)
+  - [1.4 Delete File Support](#14-delete-file-support)
+  - [1.5 Schema Evolution](#15-schema-evolution)
+  - [1.6 DataFusion Integration](#16-datafusion-integration)
+  - [1.7 Maturity Assessment](#17-maturity-assessment)
+- [2. arrow-rs/parquet Crate](#2-arrow-rsparquet-crate)
+  - [2.1 Async Reading](#21-async-reading)
+  - [2.2 Predicate Pushdown](#22-predicate-pushdown)
+  - [2.3 Column Projection](#23-column-projection)
+  - [2.4 Performance](#24-performance)
+- [3. Gap Analysis vs. Trino Java Connector](#3-gap-analysis-vs-trino-java-connector)
+  - [Reference: Trino Java Iceberg Connector Feature Set](#reference-trino-java-iceberg-connector-feature-set)
+  - [3.1 Ready to Use](#31-ready-to-use)
+  - [3.2 Partially Implemented](#32-partially-implemented)
+  - [3.3 Missing / Custom Implementation Needed](#33-missing--custom-implementation-needed)
+- [4. Recommendations](#4-recommendations)
+  - [4.1 Architecture Decision](#41-architecture-decision)
+  - [4.2 Critical Custom Work (Priority Order)](#42-critical-custom-work-priority-order)
+  - [4.3 Version Pinning Strategy](#43-version-pinning-strategy)
+  - [4.4 Risk Mitigation](#44-risk-mitigation)
+  - [4.5 Overall Verdict](#45-overall-verdict)
+
 **Date:** 2026-04-09
 **Status:** Complete
 **Purpose:** Evaluate the Rust Iceberg and Parquet ecosystem for building a native Rust Iceberg connector in the Trino-compatible worker (Project Crucible/Forge). Assess readiness, gaps, and risks against Trino's production Java Iceberg connector.

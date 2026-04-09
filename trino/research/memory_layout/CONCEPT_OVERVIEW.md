@@ -1,5 +1,14 @@
 # Phase 1: Foundation — Data Layout & The Ingestion Bridge
 
+## Table of Contents
+- [1. The Data Hierarchy: Slice -> Block -> Page](#1-the-data-hierarchy-slice---block---page)
+  - [Slice — The Byte Substrate](#slice--the-byte-substrate)
+  - [Block — The Columnar Accessor](#block--the-columnar-accessor)
+  - [Page — The Passive Envelope](#page--the-passive-envelope)
+- [2. Separation of Data and Compute](#2-separation-of-data-and-compute)
+- [3. From S3 to Memory: The Five-Stage Pipeline](#3-from-s3-to-memory-the-five-stage-pipeline)
+- [4. Memory Tracking](#4-memory-tracking)
+
 This phase maps Trino's in-memory data representation from the lowest byte-level abstraction up to the Page that flows through the execution engine, and traces the physical path that brings raw S3 bytes into that representation.
 
 ## 1. The Data Hierarchy: Slice -> Block -> Page

@@ -1,5 +1,30 @@
 # Phase 2: Execution Model — Task Architecture & The Driver Loop (Velox)
 
+## Table of Contents
+- [1. Task Architecture: From Plan Tree to Pipelines](#1-task-architecture-from-plan-tree-to-pipelines)
+  - [`Task` — The Top-Level Execution Unit (Trino's `SqlTask`, DataFusion's `ExecutionPlan` + `TaskContext`)](#task--the-top-level-execution-unit-trinos-sqltask-datafusions-executionplan--taskcontext)
+  - [`SplitGroupState` — Inter-Pipeline Shared State](#splitgroupstate--inter-pipeline-shared-state)
+- [2. Scheduling Engine: Thread Pool and CPU Fairness](#2-scheduling-engine-thread-pool-and-cpu-fairness)
+  - [The Executor is External and Opaque](#the-executor-is-external-and-opaque)
+  - [`Driver::enqueue()` — The Single Scheduling Primitive](#driverenqueue--the-single-scheduling-primitive)
+  - [Two-Level Cooperative Time-Slicing](#two-level-cooperative-time-slicing)
+  - [Atomic Fast-Path Minimizes Lock Contention](#atomic-fast-path-minimizes-lock-contention)
+- [3. Driver Initialization: Two-Phase Lifecycle](#3-driver-initialization-two-phase-lifecycle)
+  - [Construction Under Lock, Initialization on Executor Thread](#construction-under-lock-initialization-on-executor-thread)
+  - [4-Level Memory Pool Hierarchy](#4-level-memory-pool-hierarchy)
+  - [Filter+Project Fusion](#filterproject-fusion)
+  - [Extension Points](#extension-points)
+- [4. The Cooperative Yield Loop: `Driver::runInternal()`](#4-the-cooperative-yield-loop-driverruninternal)
+  - [Consumer-First Iteration](#consumer-first-iteration)
+  - [Five Yield/Block Triggers](#five-yieldblock-triggers)
+  - [Blocking and Resumption via Futures](#blocking-and-resumption-via-futures)
+  - [`CancelGuard` RAII](#cancelguard-raii)
+- [5. Comparison with Trino and DataFusion](#5-comparison-with-trino-and-datafusion)
+  - [Execution Model](#execution-model)
+  - [Task and Driver Lifecycle](#task-and-driver-lifecycle)
+  - [Scheduling and CPU Fairness](#scheduling-and-cpu-fairness)
+  - [Blocking and Resumption](#blocking-and-resumption)
+
 Velox's execution model is a cooperative, pull-based pipeline engine built on top of an externally-injected thread pool (`folly::Executor`). Unlike Trino's morsel-driven model with dedicated scheduler threads, or DataFusion's async Rust futures pinned to a `tokio` runtime, Velox uses a self-scheduling design: each `Driver` runs until it blocks, yields, or finishes, then re-enqueues itself. The central coordination point is the `Task`, which owns the plan-to-pipeline decomposition, driver lifecycle, and all inter-pipeline shared state (join bridges, local exchanges). This phase traces the full path from `PlanNode` tree to executing operators on thread pool threads.
 
 ## 1. Task Architecture: From Plan Tree to Pipelines

@@ -1,5 +1,39 @@
 # Module Teardown: Test Organization & Infrastructure (Task 6.1.A) [KG-13]
 
+## Table of Contents
+- [0. Research Focus](#0-research-focus)
+- [1. High-Level Overview](#1-high-level-overview)
+  - [Test Tier Summary](#test-tier-summary)
+  - [Workspace Structure (68 members)](#workspace-structure-68-members)
+- [2. Detailed Analysis](#2-detailed-analysis)
+  - [2.1 Unit Tests (`#[cfg(test)]` modules)](#21-unit-tests-cfgtest-modules)
+  - [2.2 Integration Tests (`tests/` directories)](#22-integration-tests-tests-directories)
+  - [2.3 sqllogictest Infrastructure](#23-sqllogictest-infrastructure)
+  - [2.4 Snapshot Testing (Insta)](#24-snapshot-testing-insta)
+  - [2.5 Benchmark Infrastructure](#25-benchmark-infrastructure)
+  - [2.6 CI Infrastructure](#26-ci-infrastructure)
+  - [2.7 Build Profiles](#27-build-profiles)
+  - [2.8 Feature Flags as Test Gates](#28-feature-flags-as-test-gates)
+  - [2.9 Shared Test Utilities](#29-shared-test-utilities)
+- [3. Key Design Insights](#3-key-design-insights)
+  - [3.1 sqllogictest as the Primary Testing Strategy](#31-sqllogictest-as-the-primary-testing-strategy)
+  - [3.2 Feature Flags as Test Stratification](#32-feature-flags-as-test-stratification)
+  - [3.3 Single Integration Test Binary Pattern](#33-single-integration-test-binary-pattern)
+  - [3.4 Deterministic Test Isolation](#34-deterministic-test-isolation)
+  - [3.5 Multi-Layer Correctness Verification](#35-multi-layer-correctness-verification)
+  - [3.6 Snapshot Testing for Plan Representations](#36-snapshot-testing-for-plan-representations)
+- [4. Porting Considerations (DataFusion Patterns -> Trino Rust Worker)](#4-porting-considerations-datafusion-patterns---trino-rust-worker)
+  - [4.1 Adopt sqllogictest Early](#41-adopt-sqllogictest-early)
+  - [4.2 Feature-Flag-Gated Test Tiers](#42-feature-flag-gated-test-tiers)
+  - [4.3 Shared Test Utility Crate](#43-shared-test-utility-crate)
+  - [4.4 Single Binary Integration Tests](#44-single-binary-integration-tests)
+  - [4.5 CI Profile Strategy](#45-ci-profile-strategy)
+  - [4.6 Fuzz Testing for Operator Correctness](#46-fuzz-testing-for-operator-correctness)
+  - [4.7 Postgres/Trino Compatibility Testing](#47-postgrestrino-compatibility-testing)
+  - [4.8 Benchmark Verification (Correctness, Not Just Speed)](#48-benchmark-verification-correctness-not-just-speed)
+  - [4.9 Snapshot Testing for Plan Representations](#49-snapshot-testing-for-plan-representations)
+  - [4.10 Test Data Management](#410-test-data-management)
+
 ## 0. Research Focus
 
 This document analyzes DataFusion's complete testing infrastructure to inform the

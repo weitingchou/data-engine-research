@@ -1,5 +1,14 @@
 # Phase 1: Foundation — Data Layout & The Ingestion Bridge (DataFusion)
 
+## Table of Contents
+- [1. The Data Hierarchy: Buffer -> Array -> RecordBatch](#1-the-data-hierarchy-buffer---array---recordbatch)
+  - [`Buffer` — The Byte Substrate (Trino's `Slice`)](#buffer--the-byte-substrate-trinos-slice)
+  - [`Array` — The Columnar Accessor (Trino's `Block`)](#array--the-columnar-accessor-trinos-block)
+  - [`RecordBatch` — The Passive Envelope (Trino's `Page`)](#recordbatch--the-passive-envelope-trinos-page)
+- [2. Separation of Data and Compute](#2-separation-of-data-and-compute)
+- [3. From S3 to Memory: The Async Ingestion Pipeline](#3-from-s3-to-memory-the-async-ingestion-pipeline)
+- [4. Memory Tracking (RAII and Reservations)](#4-memory-tracking-raii-and-reservations)
+
 This phase maps DataFusion's in-memory data representation from the lowest byte-level abstraction up to the `RecordBatch` that flows through the execution engine. Because DataFusion is built natively on Apache Arrow, its memory model is governed by the Arrow specification — a fundamentally different foundation from Trino's JVM-based Slice/Block/Page hierarchy.
 
 ## 1. The Data Hierarchy: Buffer -> Array -> RecordBatch

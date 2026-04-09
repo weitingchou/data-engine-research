@@ -1,5 +1,24 @@
 # Phase 3: Operator Internals and Data Processing Overview (Physical Plan Execution)
 
+## Table of Contents
+- [1. The Volcano Engine and the Operator Contract](#1-the-volcano-engine-and-the-operator-contract)
+- [2. The Currency of Computation: Pages and Blocks](#2-the-currency-of-computation-pages-and-blocks)
+- [3. Pipeline Anatomy: Stateless vs. Stateful](#3-pipeline-anatomy-stateless-vs-stateful)
+  - [Stateless Operations (Stream-Through)](#stateless-operations-stream-through)
+  - [Stateful Operations (Memory-Bound)](#stateful-operations-memory-bound)
+- [4. Expression Wire Format & Compilation Pipeline](#4-expression-wire-format--compilation-pipeline)
+  - [The Wire Format: JSON AST, Not Bytecode](#the-wire-format-json-ast-not-bytecode)
+  - [Constants: Binary Blocks, Not JSON Primitives](#constants-binary-blocks-not-json-primitives)
+  - [Function Calls: Fully Resolved at the Coordinator](#function-calls-fully-resolved-at-the-coordinator)
+  - [The Two-Level Expression IR](#the-two-level-expression-ir)
+- [5. Resilience: The Disk Spilling Mechanism](#5-resilience-the-disk-spilling-mechanism)
+- [6. SIMD & Vectorization Strategy](#6-simd--vectorization-strategy)
+  - [Tier 1: Explicit Java Vector API (`jdk.incubator.vector`)](#tier-1-explicit-java-vector-api-jdkincubatorvector)
+  - [Tier 2: SWAR (SIMD Within A Register)](#tier-2-swar-simd-within-a-register)
+  - [Tier 3: JVM Auto-Vectorization](#tier-3-jvm-auto-vectorization)
+  - [Implications for the Rust Worker](#implications-for-the-rust-worker)
+- [Summary: Connecting the Dots](#summary-connecting-the-dots)
+
 If Phase 2 is about how Trino orchestrates work across a cluster and schedules time on a CPU, Phase 3 is about what actually happens during that CPU time. This phase zooms into the very bottom of the execution hierarchy: the **Operators**. This is the physical data processing engine where bytes are read, transformed, joined, and aggregated.
 
 ## 1. The Volcano Engine and the Operator Contract

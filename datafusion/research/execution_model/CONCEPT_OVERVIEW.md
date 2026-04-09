@@ -1,5 +1,19 @@
 # Phase 2: Execution Model Overview (Physical Plans & Async Streams)
 
+## Table of Contents
+- [1. Single-Node Core vs. Distributed Extensions](#1-single-node-core-vs-distributed-extensions)
+- [2. The Execution Hierarchy: From Plan to Streams](#2-the-execution-hierarchy-from-plan-to-streams)
+- [3. The Async Pull Model (Volcano over Tokio)](#3-the-async-pull-model-volcano-over-tokio)
+  - [Operator Patterns](#operator-patterns)
+  - [The `ready!()` Macro](#the-ready-macro)
+  - [Metrics and Observability](#metrics-and-observability)
+- [4. The Scheduling Engine: Tokio (Not a Custom Scheduler)](#4-the-scheduling-engine-tokio-not-a-custom-scheduler)
+  - [Controlled Spawning](#controlled-spawning)
+- [5. Repartitioning: The Internal Exchange](#5-repartitioning-the-internal-exchange)
+- [6. Drop-Based Cancellation (No State Machine)](#6-drop-based-cancellation-no-state-machine)
+- [7. The `TaskContext`: Resource Wiring](#7-the-taskcontext-resource-wiring)
+- [Summary: Connecting the Dots](#summary-connecting-the-dots)
+
 If Trino's execution model is a custom-built, highly choreographed factory floor with its own shift managers (Drivers), DataFusion's model is an elegant water pipe system leveraging gravity (Rust's async/await and the `tokio` runtime) to flow data through.
 
 ## 1. Single-Node Core vs. Distributed Extensions

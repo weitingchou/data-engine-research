@@ -1,5 +1,14 @@
 # Phase 6: Test Infrastructure & Validation Strategy Overview
 
+## Table of Contents
+- [1. Test Hierarchy](#1-test-hierarchy)
+- [2. Wire Format Tests](#2-wire-format-tests)
+- [3. Control Plane Tests](#3-control-plane-tests)
+- [4. Operator Tests](#4-operator-tests)
+- [5. Exchange Protocol Tests](#5-exchange-protocol-tests)
+- [6. Integration & End-to-End Tests](#6-integration--end-to-end-tests)
+- [Summary: Implications for the Rust Worker](#summary-implications-for-the-rust-worker)
+
 To build a drop-in replacement worker, we must not only reimplement Trino's runtime behavior — we must prove correctness at every layer. This phase maps Trino's existing test infrastructure to understand what tests exist, what gaps remain, and how the Rust worker's testing strategy should be structured.
 
 ## 1. Test Hierarchy

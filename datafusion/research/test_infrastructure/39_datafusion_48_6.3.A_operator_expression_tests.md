@@ -1,5 +1,23 @@
 # Module Teardown: Operator & Expression Testing Patterns (Task 6.3.A) [KG-13]
 
+## Table of Contents
+- [0. Research Focus](#0-research-focus)
+- [1. High-Level Overview](#1-high-level-overview)
+- [2. Detailed Analysis](#2-detailed-analysis)
+  - [2.1 Test Utility Infrastructure](#21-test-utility-infrastructure)
+  - [2.2 Operator Testing Patterns](#22-operator-testing-patterns)
+  - [2.3 Expression Testing Patterns](#23-expression-testing-patterns)
+  - [2.4 Cancellation and Cleanup Testing](#24-cancellation-and-cleanup-testing)
+- [3. Key Design Insights](#3-key-design-insights)
+- [4. Porting Considerations (DataFusion Patterns -> Trino Rust Worker)](#4-porting-considerations-datafusion-patterns---trino-rust-worker)
+  - [4.1 Adopt the TestMemoryExec Pattern](#41-adopt-the-testmemoryexec-pattern)
+  - [4.2 Use Insta for Snapshot Testing](#42-use-insta-for-snapshot-testing)
+  - [4.3 Parameterize Tests with rstest](#43-parameterize-tests-with-rstest)
+  - [4.4 Build a Type-Coverage Test Harness for Expressions](#44-build-a-type-coverage-test-harness-for-expressions)
+  - [4.5 Spill Testing Strategy](#45-spill-testing-strategy)
+  - [4.6 Cancellation Testing](#46-cancellation-testing)
+  - [4.7 Key File Reference](#47-key-file-reference)
+
 ## 0. Research Focus
 
 This analysis examines how DataFusion tests physical operators and expressions in

@@ -1,5 +1,35 @@
 # Phase 5: Memory Tracking & Arbitration — Memory Management (Velox)
 
+## Table of Contents
+- [1. The Pool Tree: Quantized Reservation With Hierarchical Propagation](#1-the-pool-tree-quantized-reservation-with-hierarchical-propagation)
+  - [Four-Level Hierarchy](#four-level-hierarchy)
+  - [Quantized Reservation: The Key to Low Contention](#quantized-reservation-the-key-to-low-contention)
+  - [Three Reservation Levels Per Pool](#three-reservation-levels-per-pool)
+  - [Ownership Model](#ownership-model)
+  - [`tsan_atomic`: Zero-Cost Atomics in Production](#tsan_atomic-zero-cost-atomics-in-production)
+- [2. Allocation Mechanisms: Three Modes, Two Implementations](#2-allocation-mechanisms-three-modes-two-implementations)
+  - [Three Allocation Modes](#three-allocation-modes)
+  - [PageRun: 8-Byte Pointer+Size Encoding](#pagerun-8-byte-pointersize-encoding)
+  - [MmapAllocator: Virtual Pre-Mapping With Physical Page Balancing](#mmapallocator-virtual-pre-mapping-with-physical-page-balancing)
+  - [Three-Tier Byte Allocation](#three-tier-byte-allocation)
+  - [Contiguous Over-Reservation](#contiguous-over-reservation)
+  - [AlignedBuffer: Inline Placement-New](#alignedbuffer-inline-placement-new)
+  - [MallocAllocator: Sharded Counters](#mallocallocator-sharded-counters)
+- [3. Memory Arbitration: Synchronous, Deterministic, Multi-Phase](#3-memory-arbitration-synchronous-deterministic-multi-phase)
+  - [Trigger Path](#trigger-path)
+  - [Six-Phase Growth Strategy](#six-phase-growth-strategy)
+  - [Global Arbitration Controller](#global-arbitration-controller)
+  - [The Reclaim Path](#the-reclaim-path)
+  - [Driver Suspension: Preventing Self-Deadlock](#driver-suspension-preventing-self-deadlock)
+  - [NonReclaimableSection Guards](#nonreclaimablesection-guards)
+  - [Abort Escalation](#abort-escalation)
+  - [Capacity Growth Strategy](#capacity-growth-strategy)
+- [4. The JNI Memory Boundary (Cross-Language Integration)](#4-the-jni-memory-boundary-cross-language-integration)
+- [5. Comparison with Trino and DataFusion](#5-comparison-with-trino-and-datafusion)
+  - [Memory Pool Architecture](#memory-pool-architecture)
+  - [Allocation Mechanisms](#allocation-mechanisms)
+  - [Memory Arbitration](#memory-arbitration)
+
 Velox's memory subsystem is a three-component architecture: a **pool tree** for hierarchical accounting, an **allocator** for physical byte-level allocation, and an **arbitrator** for dynamic capacity governance across concurrent queries. The pool tree (Query → Task → Node → Operator) mirrors the execution hierarchy, with all physical allocations happening at leaf pools but reservation accounting propagating up to the root where capacity limits are enforced. The allocator layer provides two production implementations — `MallocAllocator` (delegates to `std::malloc`) and `MmapAllocator` (manages its own address space via `mmap`/`madvise`) — both exposing the same three allocation modes (non-contiguous, contiguous, raw bytes). The arbitrator (`SharedArbitrator`) orchestrates process-wide memory sharing through a multi-phase cascade: self-growth, local self-reclaim, free capacity harvesting, and finally global arbitration via a dedicated background controller thread that coordinates cross-query spill and abort.
 
 As noted in [VELOX_IMPLEMENTATION_CHALLENGES.md](../VELOX_IMPLEMENTATION_CHALLENGES.md), the "Invisible Memory" problem is central to Velox's design as an embeddable C++ library. When Velox runs inside a JVM process (via JNI in Spark/Gluten), its C++ allocations are invisible to the JVM garbage collector. The entire memory management architecture — pools, allocators, arbitration — exists to make every byte of C++ memory explicitly tracked, bounded, and reclaimable, preventing the OS OOM killer from crashing the host process.

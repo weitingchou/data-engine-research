@@ -1,5 +1,20 @@
 # Phase 4: Communication & Interface Overview
 
+## Table of Contents
+- [1. The Control Plane (Coordinator <-> Worker)](#1-the-control-plane-coordinator---worker)
+- [2. The Data Plane (Worker <-> Worker / Shuffle)](#2-the-data-plane-worker---worker--shuffle)
+- [3. The Storage Plane (Worker <-> Connector)](#3-the-storage-plane-worker---connector)
+- [4. Worker Discovery & Cluster Membership](#4-worker-discovery--cluster-membership)
+- [5. Wire Protocol: Exact Serialization Formats](#5-wire-protocol-exact-serialization-formats)
+  - [5.1. Plan Fragment & Expression JSON](#51-plan-fragment--expression-json)
+  - [5.2. TaskUpdateRequest & TaskStatus JSON](#52-taskupdaterequest--taskstatus-json)
+  - [5.3. Page Binary Wire Format](#53-page-binary-wire-format)
+  - [5.4. Exchange HTTP Protocol](#54-exchange-http-protocol)
+  - [5.5. Partition Hash Function](#55-partition-hash-function)
+  - [5.6. Iceberg Connector Internals](#56-iceberg-connector-internals)
+  - [5.7. Split JSON Formats](#57-split-json-formats)
+- [Summary: The Hub Architecture](#summary-the-hub-architecture)
+
 To build or rewrite a Trino worker, one must view it as a hub connecting three distinct planes of communication. Each plane uses different protocols and has different performance characteristics.
 
 ## 1. The Control Plane (Coordinator <-> Worker)

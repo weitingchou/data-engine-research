@@ -1,5 +1,13 @@
 # Phase 6: Test Infrastructure & Validation Patterns Overview
 
+## Table of Contents
+- [1. Test Hierarchy](#1-test-hierarchy)
+- [2. Key Test Utilities](#2-key-test-utilities)
+- [3. Serialization Tests](#3-serialization-tests)
+- [4. Operator & Expression Tests](#4-operator--expression-tests)
+- [5. SQL-Level Correctness](#5-sql-level-correctness)
+- [Summary: Patterns for the Rust Worker](#summary-patterns-for-the-rust-worker)
+
 DataFusion's test infrastructure serves as the primary reference for how the Rust-based Trino worker should structure its own test suite. This phase maps DataFusion's idiomatic Rust testing patterns — from inline unit tests to cross-engine SQL correctness validation.
 
 ## 1. Test Hierarchy

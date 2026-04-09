@@ -1,5 +1,34 @@
 # Module Teardown: SQL-Level Correctness & Reference Validation (Task 6.4.A) [KG-13]
 
+## Table of Contents
+- [0. Research Focus](#0-research-focus)
+- [1. High-Level Overview](#1-high-level-overview)
+  - [Architecture Summary](#architecture-summary)
+  - [Three Execution Modes](#three-execution-modes)
+- [2. Detailed Analysis](#2-detailed-analysis)
+  - [2.1 The `.slt` File Format](#21-the-slt-file-format)
+  - [2.2 The Test Runner Binary (sqllogictests.rs)](#22-the-test-runner-binary-sqllogictestsrs)
+  - [2.3 The DataFusion Engine (runner.rs, normalize.rs)](#23-the-datafusion-engine-runnerrs-normalizerrs)
+  - [2.4 The Postgres Engine (postgres_engine/mod.rs)](#24-the-postgres-engine-postgres_enginemodrs)
+  - [2.5 Postgres Container Lifecycle (postgres_container.rs)](#25-postgres-container-lifecycle-postgres_containerrs)
+  - [2.6 Postgres Compatibility Test Files](#26-postgres-compatibility-test-files)
+  - [2.7 Query Coverage Analysis](#27-query-coverage-analysis)
+  - [2.8 TPC-H as Correctness + Plan Regression](#28-tpc-h-as-correctness--plan-regression)
+  - [2.9 Benchmark Suite (benchmarks/)](#29-benchmark-suite-benchmarks)
+  - [2.10 Regression Test Pattern](#210-regression-test-pattern)
+  - [2.11 Value Validation and Normalization](#211-value-validation-and-normalization)
+  - [2.12 Filter System for Targeted Execution](#212-filter-system-for-targeted-execution)
+- [3. Key Design Insights](#3-key-design-insights)
+- [4. Porting Considerations (DataFusion Patterns -> Trino Rust Worker)](#4-porting-considerations-datafusion-patterns---trino-rust-worker)
+  - [4.1 Reference Oracle Pattern](#41-reference-oracle-pattern)
+  - [4.2 Adopting sqllogictest](#42-adopting-sqllogictest)
+  - [4.3 Normalization Challenges](#43-normalization-challenges)
+  - [4.4 Test Coverage Strategy](#44-test-coverage-strategy)
+  - [4.5 Plan Regression Testing](#45-plan-regression-testing)
+  - [4.6 Practical Workflow](#46-practical-workflow)
+  - [4.7 Differences from DataFusion's Approach](#47-differences-from-datafusions-approach)
+  - [4.8 The "Worker Only" Constraint](#48-the-worker-only-constraint)
+
 ## 0. Research Focus
 
 How does DataFusion validate end-to-end SQL correctness? This research traces the sqllogictest infrastructure -- from the test runner binary through the dual-engine (DataFusion + Postgres) execution model to the `.slt` file format -- to understand:

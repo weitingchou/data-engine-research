@@ -1,5 +1,19 @@
 # Phase 2: Trino Execution Model Overview
 
+## Table of Contents
+- [1. The Execution Hierarchy: From Query to Hardware](#1-the-execution-hierarchy-from-query-to-hardware)
+- [2. The Bridge: Splits and Scheduling](#2-the-bridge-splits-and-scheduling)
+- [3. The Nervous System: Data Movement (Exchanges)](#3-the-nervous-system-data-movement-exchanges)
+- [4. Inside the Worker: Pipelines, Drivers, and Operators](#4-inside-the-worker-pipelines-drivers-and-operators)
+  - [The Pipeline Taxonomy](#the-pipeline-taxonomy)
+  - [The Operator Chain](#the-operator-chain)
+- [5. Cooperative Scheduling: The Engine Heart](#5-cooperative-scheduling-the-engine-heart)
+  - [The Yield Loop](#the-yield-loop)
+  - [The Multilevel Feedback Queue](#the-multilevel-feedback-queue)
+- [6. The Task Lifecycle: Birth, Execution, and Death](#6-the-task-lifecycle-birth-execution-and-death)
+  - [Resource Cleanup Chain](#resource-cleanup-chain)
+- [Summary: Connecting the Dots](#summary-connecting-the-dots)
+
 When a SQL query hits the Trino Coordinator, it doesn't just send the raw SQL to the workers. It compiles, optimizes, and shatters the query into a highly coordinated, distributed execution plan. This phase bridges the gap between the logical query and the physical hardware.
 
 ## 1. The Execution Hierarchy: From Query to Hardware

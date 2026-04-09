@@ -1,5 +1,22 @@
 # Phase 3: Operator Internals & Compute Overview (DataFusion)
 
+## Table of Contents
+- [1. The Volcano Contract: `Stream` vs. `Operator`](#1-the-volcano-contract-stream-vs-operator)
+  - [Three Canonical `poll_next` Patterns](#three-canonical-poll_next-patterns)
+  - [Observability: `ObservedStream` / `record_poll()`](#observability-observedstream--record_poll)
+- [2. Compute: Physical Expressions and Arrow Kernels](#2-compute-physical-expressions-and-arrow-kernels)
+- [3. Pipeline Anatomy: Simple vs. Complex Stream Chains](#3-pipeline-anatomy-simple-vs-complex-stream-chains)
+  - [Simple Pipelines (Stateless Nesting)](#simple-pipelines-stateless-nesting)
+  - [Complex Pipelines (Stateful Breakers)](#complex-pipelines-stateful-breakers)
+- [4. Resilience: Proactive Disk Spilling](#4-resilience-proactive-disk-spilling)
+- [5. SIMD & Auto-Vectorization Strategy](#5-simd--auto-vectorization-strategy)
+  - [The Auto-Vectorization Contract](#the-auto-vectorization-contract)
+  - [Why Auto-Vectorization Works](#why-auto-vectorization-works)
+  - [DataFusion's Own Vectorized Loops](#datafusions-own-vectorized-loops)
+  - [No Explicit SIMD — By Design](#no-explicit-simd--by-design)
+  - [Implications for the Rust Worker](#implications-for-the-rust-worker)
+- [Summary: Connecting the Dots](#summary-connecting-the-dots)
+
 This phase focuses on the physical data processing engine. While Trino uses a custom push-pull Operator state machine and generates JVM bytecode for compute, DataFusion implements an **asynchronous, vectorized Volcano model** and relies on pre-compiled Apache Arrow compute kernels.
 
 ## 1. The Volcano Contract: `Stream` vs. `Operator`

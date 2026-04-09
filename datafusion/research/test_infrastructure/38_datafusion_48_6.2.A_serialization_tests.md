@@ -1,5 +1,24 @@
 # Module Teardown: Arrow Serialization & Round-Trip Tests (Task 6.2.A) [KG-13]
 
+## Table of Contents
+- [0. Research Focus](#0-research-focus)
+- [1. High-Level Overview](#1-high-level-overview)
+- [2. Detailed Analysis](#2-detailed-analysis)
+  - [2.1 Core Roundtrip Test Patterns](#21-core-roundtrip-test-patterns)
+  - [2.2 Serializeable Trait and Bytes Module](#22-serializeable-trait-and-bytes-module)
+  - [2.3 ScalarValue Round-Trip Tests](#23-scalarvalue-round-trip-tests)
+  - [2.4 IPC Encoding for Nested ScalarValues](#24-ipc-encoding-for-nested-scalarvalues)
+  - [2.5 Plan-Level Roundtrip Tests](#25-plan-level-roundtrip-tests)
+  - [2.6 Expression Deduplication Tests](#26-expression-deduplication-tests)
+  - [2.7 Extension Codec Testing Pattern](#27-extension-codec-testing-pattern)
+  - [2.8 FFI Codec Roundtrip Tests](#28-ffi-codec-roundtrip-tests)
+  - [2.9 IPC Stream Roundtrip (Spill Tests)](#29-ipc-stream-roundtrip-spill-tests)
+  - [2.10 RecordBatch Construction Test Utilities](#210-recordbatch-construction-test-utilities)
+  - [2.11 Substrait Roundtrip Tests](#211-substrait-roundtrip-tests)
+  - [2.12 Deeply Nested Expression Tests](#212-deeply-nested-expression-tests)
+- [3. Key Design Insights](#3-key-design-insights)
+- [4. Porting Considerations (DataFusion Patterns -> Trino Rust Worker)](#4-porting-considerations-datafusion-patterns---trino-rust-worker)
+
 ## 0. Research Focus
 
 This document analyzes DataFusion's serialization test infrastructure, covering:
