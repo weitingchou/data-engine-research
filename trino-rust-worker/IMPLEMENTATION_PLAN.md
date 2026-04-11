@@ -466,16 +466,44 @@ Splits are wrapped in a four-level nesting: `SplitAssignment` (plan node ID + sp
 - **IcebergSplit (15 fields):** file path, offset, length, file format (PARQUET/ORC), delete files, partition data as pre-serialized JSON, `fileStatisticsDomain` as `TupleDomain`.
 - **Polymorphic `@type`:** `"hive:io.trino.plugin.hive.HiveSplit"` (classloader ID + FQCN).
 
+**Async I/O — key improvement over Trino (research: Task 1.4.A):**
+
+Trino's Parquet reader is synchronous and single-threaded per split: each `ChunkReader.read()` blocks the query thread on S3 latency (~5–50ms per request). There is no prefetching, no async I/O, and no intra-split parallelism. Parallelism comes only from assigning different splits to different threads.
+
+Our Rust worker improves on this with async I/O and prefetching via `object_store` + Tokio:
+
+| Trino (synchronous) | Rust worker (async) |
+|---|---|
+| Blocking `GetObject` via AWS SDK sync client | `object_store` async range reads (non-blocking) |
+| Query thread stalls on every S3 call | Query task yields to Tokio while I/O completes |
+| No prefetching — row groups read on demand | Prefetch next row group's column chunks while processing current |
+| No intra-row-group parallelism | Concurrent column chunk fetches within a row group |
+| Merged range reads are eager-planned, lazy-executed | Same merge strategy, but fetches are `tokio::spawn`ed concurrently |
+
+Prefetching design:
+- Spawn a background Tokio task per split that reads ahead by 1–2 row groups
+- Buffer prefetched column chunks in a bounded `tokio::sync::mpsc` channel (backpressure when memory is tight)
+- The scan operator `await`s the channel, getting pre-fetched data with zero S3 wait in the common case
+- Prefetch budget is bounded by `MemoryReservation` — stops prefetching when memory pressure is high
+
+Correctness constraints (must be preserved from Trino):
+- Merged disk ranges for the same column chunk must be stitched in file order
+- Dictionary page must be read before data pages within a column chunk
+- Definition levels must be decoded before values (they determine null positions)
+- Row range filtering must be applied consistently across all columns in a row group
+
 **Implementation:**
 - [ ] `SplitAssignment` → `ScheduledSplit` → `Split` deserialization with 4-level nesting
 - [ ] `HiveSplit` struct: 17 fields with file path, offset, length, partition keys
 - [ ] `IcebergSplit` struct: 15 fields with file format, delete files, partition data
 - [ ] Connector split dispatcher: route by `@type` prefix (e.g., `"hive:"` → Hive connector)
-- [ ] Async Parquet reading via `parquet` crate + `object_store`
+- [ ] Async Parquet reading via `parquet` crate + `object_store` (non-blocking range reads)
+- [ ] Row-group prefetcher: background task that reads ahead 1–2 row groups into bounded channel
+- [ ] Concurrent column chunk fetches within a row group via `tokio::JoinSet`
 - [ ] Row-group pruning via min/max statistics
 - [ ] Predicate pushdown to Parquet page index (where supported)
 - [ ] Column projection pushdown (only read requested columns)
-- [ ] Memory-aware: register allocations against `MemoryReservation`
+- [ ] Memory-aware: register allocations against `MemoryReservation`; pause prefetch under pressure
 
 #### 5C. Core Operators (`operators`)
 
