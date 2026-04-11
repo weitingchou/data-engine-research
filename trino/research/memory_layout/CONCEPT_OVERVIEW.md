@@ -1,9 +1,9 @@
 # Phase 1: Foundation — Data Layout & The Ingestion Bridge
 
 ## Table of Contents
-- [1. The Data Hierarchy: Slice -> Block -> Page](#1-the-data-hierarchy-slice---block---page)
-  - [Slice — The Byte Substrate](#slice--the-byte-substrate)
+- [1. The Data Hierarchy: Block, Page, and Slice](#1-the-data-hierarchy-block-page-and-slice)
   - [Block — The Columnar Accessor](#block--the-columnar-accessor)
+  - [Slice — Byte Buffer for Variable-Width Data](#slice--byte-buffer-for-variable-width-data)
   - [Page — The Passive Envelope](#page--the-passive-envelope)
 - [2. Separation of Data and Compute](#2-separation-of-data-and-compute)
 - [3. From S3 to Memory: The Five-Stage Pipeline](#3-from-s3-to-memory-the-five-stage-pipeline)
@@ -11,29 +11,56 @@
 
 This phase maps Trino's in-memory data representation from the lowest byte-level abstraction up to the Page that flows through the execution engine, and traces the physical path that brings raw S3 bytes into that representation.
 
-## 1. The Data Hierarchy: Slice -> Block -> Page
-
-### Slice — The Byte Substrate
-`Slice` (from airlift v2.3) is a bounded view over a heap `byte[]` array with typed, little-endian access via `VarHandle`. It has five fields: `byte[] base`, `int baseOffset`, `int size`, `long retainedSize`, and a lazily-cached `int hash` (XxHash64, benign data race).
-
-Key facts from the source:
-- **Heap-only in v2.3.** The historical dual-mode architecture (v0.45 used `Object base + long address` to support both heap and direct/off-heap memory) was removed. Modern Slice wraps only `byte[]`.
-- **Unsafe is NOT fully eliminated.** VarHandle replaced Unsafe for single-element typed access (`getInt`, `setLong`, etc.), but `Unsafe` survives in three places: bulk typed-array copies (`copyFromBase`/`copyToBase` via `Unsafe.copyMemory`), `XxHash64` (uses `Unsafe.getLong/getInt/getByte` for high-throughput hashing), and `JvmUtils` (initialization, direct buffer address extraction).
-- **Zero-copy slicing:** `slice(offset, length)` returns a new Slice sharing the same `base` array with an adjusted `baseOffset`. The child inherits the parent's `retainedSize`, ensuring accurate memory accounting.
-- **Growth strategy:** `Slices.ensureSize()` doubles below 512KB, grows by 1.25x above. Uses `Arrays.copyOfRange` to skip zeroing.
+## 1. The Data Hierarchy: Block, Page, and Slice
 
 ### Block — The Columnar Accessor
 `Block` is a **sealed interface** permitting exactly three implementations:
-1. **`ValueBlock`** (non-sealed) — concrete physical storage. 11 implementations (`LongArrayBlock`, `VariableWidthBlock`, `IntArrayBlock`, etc.), each a thin wrapper over primitive arrays.
+1. **`ValueBlock`** (non-sealed) — concrete physical storage. 11 implementations (`LongArrayBlock`, `VariableWidthBlock`, `IntArrayBlock`, etc.).
 2. **`DictionaryBlock`** — `int[] ids` indexing into a `ValueBlock` dictionary. Lazy projection without data copying.
 3. **`RunLengthEncodedBlock`** — a single `ValueBlock` value repeated N times. Constant memory regardless of row count.
+
+#### ValueBlock Storage: What Actually Holds the Data
+
+Each ValueBlock type chooses its own backing storage. **Slice is NOT a universal memory layer beneath all Blocks** — it only appears where variable-length byte data needs offset-based access. Fixed-width types use raw Java primitive arrays directly.
+
+| Block Type | Backing Storage | Null Tracking | Bytes/Position |
+|---|---|---|---|
+| `LongArrayBlock` | `long[] values` | `boolean[] valueIsNull` | 9 (8+1) |
+| `IntArrayBlock` | `int[] values` | `boolean[] valueIsNull` | 5 (4+1) |
+| `ShortArrayBlock` | `short[] values` | `boolean[] valueIsNull` | 3 (2+1) |
+| `ByteArrayBlock` | `byte[] values` | `boolean[] valueIsNull` | 2 (1+1) |
+| `Int128ArrayBlock` | `long[] values` (2 longs per position) | `boolean[] valueIsNull` | 17 (16+1) |
+| `Fixed12Block` | `int[] values` (3 ints per position) | `boolean[] valueIsNull` | 13 (12+1) |
+| `VariableWidthBlock` | **`Slice slice`** + `int[] offsets` | `boolean[] valueIsNull` | variable |
+| `ArrayBlock` | nested `Block values` + `int[] offsets` | `boolean[] valueIsNull` | variable |
+| `MapBlock` | nested `Block keys` + `Block values` + `int[] offsets` | `boolean[] valueIsNull` | variable |
+| `RowBlock` | `Block[] fieldBlocks` | `boolean[] rowIsNull` | variable |
+| `DictionaryBlock` | `ValueBlock dictionary` + `int[] ids` | via dictionary | 4 (id only) |
+| `RunLengthEncodedBlock` | single `ValueBlock value` | via value | ~0 (amortized) |
+
+Key takeaway: when you read a Parquet file with a BIGINT column, the decoded values land in a `long[]` array wrapped by `LongArrayBlock` — no Slice involved. Only VARCHAR/VARBINARY columns go through `VariableWidthBlock`, which uses a `Slice` to hold contiguous byte data with offset-based access.
+
+#### Zero-Copy Slicing via `arrayOffset`
 
 The **`arrayOffset` pattern** is the backbone of zero-copy slicing. Both `LongArrayBlock` and `VariableWidthBlock` store an `arrayOffset` field that shifts the logical start within shared backing arrays:
 - `LongArrayBlock.getRegion(offset, length)` → new LongArrayBlock with `arrayOffset += offset`, sharing the same `long[] values` and `boolean[] valueIsNull`.
 - `VariableWidthBlock.getRegion(offset, length)` → new VariableWidthBlock with `arrayOffset += offset`, sharing the same `Slice`, `int[] offsets`, and `boolean[] valueIsNull`.
 - Chained `getRegion()` calls compose additively — all views point to the same backing arrays.
 
-Null representation: `@Nullable boolean[] valueIsNull`. When `null`, the block has zero nulls — `mayHaveNull()` is an O(1) null-pointer check. `build()` drops the array entirely if `hasNullValue` is false. The default `getPositions()` wraps in a `DictionaryBlock` rather than copying data.
+#### Null Representation
+
+`@Nullable boolean[] valueIsNull`. When `null`, the block has zero nulls — `mayHaveNull()` is an O(1) null-pointer check. `build()` drops the array entirely if `hasNullValue` is false. The default `getPositions()` wraps in a `DictionaryBlock` rather than copying data.
+
+### Slice — Byte Buffer for Variable-Width Data
+`Slice` (from airlift v2.3) is a bounded view over a heap `byte[]` array with typed, little-endian access via `VarHandle`. It has five fields: `byte[] base`, `int baseOffset`, `int size`, `long retainedSize`, and a lazily-cached `int hash` (XxHash64, benign data race).
+
+Its primary role in the data layout is as the backing store for `VariableWidthBlock` — holding contiguous byte data for VARCHAR/VARBINARY columns. It also appears in the I/O pipeline (stages 2-3) as a buffer for raw and decompressed Parquet page bytes before they are decoded into typed arrays.
+
+Key facts from the source:
+- **Heap-only in v2.3.** The historical dual-mode architecture (v0.45 used `Object base + long address` to support both heap and direct/off-heap memory) was removed. Modern Slice wraps only `byte[]`.
+- **Unsafe is NOT fully eliminated.** VarHandle replaced Unsafe for single-element typed access (`getInt`, `setLong`, etc.), but `Unsafe` survives in three places: bulk typed-array copies (`copyFromBase`/`copyToBase` via `Unsafe.copyMemory`), `XxHash64` (uses `Unsafe.getLong/getInt/getByte` for high-throughput hashing), and `JvmUtils` (initialization, direct buffer address extraction).
+- **Zero-copy slicing:** `slice(offset, length)` returns a new Slice sharing the same `base` array with an adjusted `baseOffset`. The child inherits the parent's `retainedSize`, ensuring accurate memory accounting.
+- **Growth strategy:** `Slices.ensureSize()` doubles below 512KB, grows by 1.25x above. Uses `Arrays.copyOfRange` to skip zeroing.
 
 ### Page — The Passive Envelope
 `Page` is a structurally minimal container: `Block[] blocks` + `int positionCount`. Its ~144-byte overhead (10-column page) is negligible. Page stores zero actual data bytes — it is a thin envelope around Block references.
