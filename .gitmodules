@@ -7,3 +7,6 @@
 [submodule "velox/velox"]
 	path = velox/velox
 	url = https://github.com/facebookincubator/velox.git
+[submodule "comet/datafusion-comet"]
+	path = comet/datafusion-comet
+	url = https://github.com/apache/datafusion-comet.git
